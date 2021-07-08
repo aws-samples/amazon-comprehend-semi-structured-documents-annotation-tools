@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: ComprehendSemiStructuredDocumentsAnnotationLambda
+    Description: Deploys a Lambda which create resources to start GT SemiStructured Documents labeling job.
+    Author: AWS Comprehend
+    ReadmeUrl: README.md
+    Labels: [serverless]
+    HomePageUrl: https://aws.amazon.com/comprehend/
+    SemanticVersion: 1.0.0
+    SourceCodeUrl: https://github.com/aws-samples/amazon-comprehend-examples
+
+Parameters:
+  PreHumanLambdaTimeoutInSeconds:
+    Type: Number
+    Default: 300
+    MaxValue: 900
+    Description: Timeout in seconds for PreHumanLambba. Default is 300.
+  ConsolidationLambdaTimeoutInSeconds:
+    Type: Number
+    Default: 300
+    MaxValue: 900
+    Description: Timeout in seconds for ConsolidationLambba. Default is 300.
+
+Resources:
+  SemiStructuredDocumentsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 
+        Fn::Sub: comprehend-semi-structured-documents-${AWS::Region}-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: []
+            AllowedMethods: [GET]
+            AllowedOrigins: ['*']
+
+  SemiStructuredDocumentsS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: SemiStructuredDocumentsS3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "S3GetObjectGT"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - s3:GetObject
+            Resource:
+              Fn::Sub: "arn:aws:s3:::${SemiStructuredDocumentsS3Bucket}/*"
+
+  BucketAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      Roles:
+        - Ref: SageMakerExecutionRole
+        - Ref: GTPreHumanTaskLambdaExecutionRole
+        - Ref: GTAnnotationConsolidationLambdaExecutionRole
+      PolicyName: BucketAccessPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !Sub 'arn:aws:s3:::${SemiStructuredDocumentsS3Bucket}'
+          - Effect: "Allow"
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+            Resource:
+              - !Sub 'arn:aws:s3:::${SemiStructuredDocumentsS3Bucket}/*'
+
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+              AWS: !GetAtt GTAnnotationConsolidationLambdaExecutionRole.Arn
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt GTPreHumanTaskLambdaFunction.Arn
+                  - !GetAtt GTAnnotationConsolidationLambdaFunction.Arn
+
+  GTPreHumanTaskLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyName: TextractPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - textract:AnalyzeDocument
+                  - textract:DetectDocumentText
+                Resource: '*'
+
+  GTAnnotationConsolidationLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  GTPreHumanTaskLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: pre_human_task_lambda.lambda_handler
+      MemorySize: 10240
+      Role:
+        Fn::GetAtt: [GTPreHumanTaskLambdaExecutionRole, Arn]
+      CodeUri: src
+      Layers:
+        - !Ref PopplerBinariesLayer
+      Runtime: python3.8
+      Timeout: !Ref PreHumanLambdaTimeoutInSeconds
+
+  GTAnnotationConsolidationLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: annotation_consolidation_lambda.lambda_handler
+      MemorySize: 10240
+      Role: !GetAtt GTAnnotationConsolidationLambdaExecutionRole.Arn
+      CodeUri: src
+      Runtime: python3.8
+      Timeout: !Ref ConsolidationLambdaTimeoutInSeconds
+
+  PopplerBinariesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: PopplerBinariesLayer
+      Description: Poppler binaries needed to extract PDF
+      ContentUri: Layers/Poppler/
+      CompatibleRuntimes:
+        - python3.8
+      LicenseInfo: 'GPLv2'
+
+Outputs:
+  GTPreHumanTaskLambdaFunctionName:
+    Description: Gt Pre Human Task Lambda Function Name.
+    Value: !GetAtt GTPreHumanTaskLambdaFunction.Arn
+
+  GTAnnotationConsolidationLambdaFunctionName:
+    Description: Gt Annotation Consolidation Lambda Function Name.
+    Value: !GetAtt GTAnnotationConsolidationLambdaFunction.Arn
+
+  SemiStructuredDocumentsS3Bucket:
+    Description: S3 Bucket that stores the manifests and output data for the Amazon SageMaker Ground Truth job.
+    Value: !Ref SemiStructuredDocumentsS3Bucket
+
+  SageMakerRoleARN:
+    Description: IAM Role used assumed by Amazon SageMaker to invoke pre- and post-labeling functions during the Amazon SageMaker Ground Truth Job.
+    Value: !GetAtt SageMakerExecutionRole.Arn
+
+  GTPreHumanTaskLambdaRoleARN:
+    Description: Role for GT Pre Human Task function lambda.
+    Value: !GetAtt GTPreHumanTaskLambdaExecutionRole.Arn
+
+  GTAnnotationConsolidationLambdaRoleARN:
+    Description: Role for GT Annotation Consolidation function lambda.
+    Value: !GetAtt GTAnnotationConsolidationLambdaExecutionRole.Arn
