@@ -122,11 +122,14 @@ def generate_manifests_from_previous_jobs(s3_client, sagemaker_client, primary_o
     for idx, manifest_line in enumerate(primary_output_manifest_contents.splitlines()):
         primary_output_manifest_obj = json.loads(manifest_line)
         primary_output_manifest_obj['metadata']['labels'] = labels
-        primary_annotation_ref = primary_output_manifest_obj[args.blind1_labeling_job_name]['annotation-ref']
+        primary_annotation_ref = None if (args.blind1_labeling_job_name not in primary_output_manifest_obj or \
+                                 'annotation-ref' not in primary_output_manifest_obj[args.blind1_labeling_job_name]) else \
+                                 primary_output_manifest_obj[args.blind1_labeling_job_name]['annotation-ref']
 
         secondary_output_manifest_obj = json.loads(secondary_output_manifest_lines[idx]) if args.blind2_labeling_job_name else {}
-        secondary_annotation_ref = secondary_output_manifest_obj[args.blind2_labeling_job_name]['annotation-ref'] \
-                                    if secondary_output_manifest_obj else None
+        secondary_annotation_ref = None if (args.blind2_labeling_job_name not in secondary_output_manifest_obj or \
+                                   'annotation-ref' not in secondary_output_manifest_obj[args.blind2_labeling_job_name]) else \
+                                   secondary_output_manifest_obj[args.blind2_labeling_job_name]['annotation-ref']
 
         manifest_json = {
             'source-ref': primary_output_manifest_obj['source-ref'],
@@ -155,7 +158,7 @@ def validate_and_download_from_input_s3_path(s3_resource, ssie_documents_s3_buck
     local_dir = '/tmp/{}'.format(uuid.uuid4())
     bucket = s3_resource.Bucket(input_bucket)
 
-    for obj in bucket.objects.filter(Prefix=input_key):
+    for obj in bucket.objects.filter(Prefix=f'{input_key}/'):
         if obj.key.endswith('.pdf'):
             target = obj.key if local_dir is None \
                 else os.path.join(local_dir, os.path.basename(obj.key))
@@ -169,6 +172,24 @@ def validate_and_download_from_input_s3_path(s3_resource, ssie_documents_s3_buck
     print(f'Downloaded files to temp local directory {local_dir}')
 
     return (input_s3_path, local_dir)
+
+
+def get_labels_and_manifest(schema_content, args):
+    """Get schema content and labels from cli argument or automated creation."""
+    if args.schema_path:
+        labels = json.loads(schema_content)['schemas']['named_entity']['tags']
+    else:
+        labels = DEFAULT_LABELS if not args.entity_types else args.entity_types
+        schema_content = json.dumps({"version": "SSIE_NER_SCHEMA_2021-04-15",
+                        "schemas": {
+                            "named_entity": {
+                                "annotation_task": "NER",
+                                "tags": labels,
+                                "properties": []}},
+                        "exported_time": "2021-04-15T17:34:34.493Z",
+                        "uuid": "f44b0438-72ac-43ac-bdc7-5727914522b9"
+                        })
+    return schema_content, labels
 
 
 def generate_manifests_and_schema(s3_client, s3_resource, sagemaker_client, ssie_documents_s3_bucket,
@@ -193,39 +214,34 @@ def generate_manifests_and_schema(s3_client, s3_resource, sagemaker_client, ssie
             return None
         input_s3_path, local_dir = paths
 
-        labels = DEFAULT_LABELS if not args.entity_types else args.entity_types
-        schema_content = json.dumps({"version": "SSIE_NER_SCHEMA_2021-04-15",
-                        "schemas": {
-                            "named_entity": {
-                                "annotation_task": "NER",
-                                "tags": labels,
-                                "properties": []}},
-                        "exported_time": "2021-04-15T17:34:34.493Z",
-                        "uuid": "f44b0438-72ac-43ac-bdc7-5727914522b9"
-                        })
+        schema_content = get_s3_file_contents(s3_client, args.schema_path) if args.schema_path else None
+        schema_content, labels = get_labels_and_manifest(schema_content, args)
 
         # Generate input manifest file for each page of PDF.
         manifest_json_list = []
         for file_name in os.listdir(local_dir):
             file_path = os.path.join(local_dir, file_name)
-            with pdfplumber.open(file_path) as pdf:
-                for i in range(len(pdf.pages)):
-                    manifest_json = {
-                        'source-ref': f'{input_s3_path}/{file_name}',
-                        'page': f'{i+1}',
-                        'metadata': {
-                            'pages': f'{len(pdf.pages)}',
-                            'use-textract-only': use_textract_only,
-                            'labels': labels
-                        },
-                        'annotator-metadata': annotator_metadata,
-                    }
-                    manifest_json_list.append(manifest_json)
+            try:
+                with pdfplumber.open(file_path) as pdf:
+                    for i in range(len(pdf.pages)):
+                        manifest_json = {
+                            'source-ref': f'{input_s3_path}/{file_name}',
+                            'page': f'{i+1}',
+                            'metadata': {
+                                'pages': f'{len(pdf.pages)}',
+                                'use-textract-only': use_textract_only,
+                                'labels': labels
+                            },
+                            'annotator-metadata': annotator_metadata,
+                        }
+                        manifest_json_list.append(manifest_json)
+            except Exception:
+                print(f'Unreadable file: {file_path}. Skipping.')
+                continue
 
         cleanup(local_dir)
         print(f'Deleted downloaded temp files from {local_dir}')
-
-    return manifest_json_list, schema_content
+    return (manifest_json_list, schema_content) if manifest_json_list else None
 
 
 def main():
@@ -242,6 +258,7 @@ def main():
     parser.add_argument('--annotator-metadata', type=str, help='Metadata to expose in the annotator UI. Usage: --annotator-metadata "key=Info,value=Sample information,key=Due Date,value=Sample date value 12/12/1212" ')
     parser.add_argument('--blind1-labeling-job-name', type=str, help='Blind1 labeling job name to use for arbitration or iteration')
     parser.add_argument('--blind2-labeling-job-name', type=str, help='Blind2 labeling job name to use for arbitration')
+    parser.add_argument('--schema-path', type=str, help='Local path to schema file to use for the labeling job which will overwrite --entity-types. Usage: --annotation-schema /home/user1/schema.json')
 
     args = parser.parse_args()
 
@@ -288,6 +305,7 @@ def main():
         args
     )
     if not generated_data:
+        print('Data could not be extracted. Exiting.')
         return
     manifest_json_list, schema_content = generated_data
 

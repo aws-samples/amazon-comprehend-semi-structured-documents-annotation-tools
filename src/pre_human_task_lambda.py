@@ -14,6 +14,7 @@ from typing import Union
 from block_helper import JSONHandler, Geometry, Block, Relationship
 
 
+TEXTRACT_BYTE_LIMIT = 5000000
 VERSION = "2021-04-30"
 TOTAL_IMAGE_SIZE_TO_PAGE_SIZE_RATIO_THREASHOLD = 0.25
 POPPLER_PATH = '/opt/bin/'
@@ -59,7 +60,7 @@ def get_pdf_blocks(pdf_bytes, page_num, use_textract_only):
 
         if use_textract_only or is_scanned_pdf(page.images, width, height):
             print(f"use_textract_only = {use_textract_only} or Scanned PDF. getting blocks from textract")
-            blocks = blocks_from_scanned_pdf(pdf_bytes, page_num)
+            blocks = blocks_from_scanned_pdf(pdf_bytes, page_num, dims=(float(width), float(height)))
             is_native_pdf = False
         else:
             print(f"use_textract_only = {use_textract_only} or Native PDF, getting blocks from pdf parser")
@@ -126,31 +127,49 @@ def plumber_line_to_blocks(page, plumber_line, blockIndex, page_width, page_heig
 
 def blocks_from_native_pdf(page, page_num, page_width, page_height):
     """Return a list of blocks from a native PDF."""
-    # print('blocks_from_native_pdf')
+    blocks = []
+
     text = page.extract_text()
-    lines = [strippedLine for strippedLine in [lineWithSpace.strip() for lineWithSpace in text.split('\n')] if strippedLine]
-    lineIndex = 0
-    lineWords = lines[lineIndex].split()
-    wordIndex = 0
+    lines = [strippedLine for strippedLine in [lineWithSpace.strip() for lineWithSpace in (text if text else '').split('\n')] if strippedLine]
+    if lines:
+        lineIndex = 0
+        lineWords = lines[lineIndex].split()
+        wordIndex = 0
 
-    plumberText = []
-    plumberLine = []
+        plumberText = []
+        plumberLine = []
 
-    words = page.extract_words()
-    token_sub_search_index = 0
-    word_sub_search_index = 0
-    token_block_list_idx = 0
-    while token_block_list_idx < len(words):
-        token_block = words[token_block_list_idx]
-        block_word_index_in_line_word = lineWords[wordIndex][word_sub_search_index:].find(token_block['text'][token_sub_search_index:])
-        if block_word_index_in_line_word > -1:
-            # block word is a sub-part of text word ex. text: "word__in__line", block: "word"
-            if lineWords[wordIndex][word_sub_search_index:] == token_block['text'][:token_sub_search_index]:
-                word_sub_search_index = len(lineWords[wordIndex])
+        words = page.extract_words()
+        token_sub_search_index = 0
+        word_sub_search_index = 0
+        token_block_list_idx = 0
+        while token_block_list_idx < len(words):
+            token_block = words[token_block_list_idx]
+            block_word_index_in_line_word = lineWords[wordIndex][word_sub_search_index:].find(token_block['text'][token_sub_search_index:])
+            if block_word_index_in_line_word > -1:
+                # block word is a sub-part of text word ex. text: "word__in__line", block: "word"
+                if lineWords[wordIndex][word_sub_search_index:] == token_block['text'][:token_sub_search_index]:
+                    word_sub_search_index = len(lineWords[wordIndex])
+                else:
+                    word_sub_search_index = word_sub_search_index + block_word_index_in_line_word + len(token_block['text'][token_sub_search_index:])
+                plumberLine.append(token_block)
+                if word_sub_search_index == len(lineWords[wordIndex]):
+                    if wordIndex < len(lineWords) - 1:
+                        wordIndex += 1
+                    else:
+                        if lineIndex < len(lines) - 1:
+                            lineIndex += 1
+                            lineWords = lines[lineIndex].split()
+                            wordIndex = 0
+                            plumberText.append(plumberLine)
+                            plumberLine = []
+                    word_sub_search_index = 0
+
+                token_block_list_idx += 1
+                token_sub_search_index = 0
             else:
-                word_sub_search_index = word_sub_search_index + block_word_index_in_line_word + len(token_block['text'][token_sub_search_index:])
-            plumberLine.append(token_block)
-            if word_sub_search_index == len(lineWords[wordIndex]):
+                # text word is a sub-part of block word ex. text: "word", block: "word__in___line"
+                token_sub_search_index += len(lineWords[wordIndex])
                 if wordIndex < len(lineWords) - 1:
                     wordIndex += 1
                 else:
@@ -158,35 +177,18 @@ def blocks_from_native_pdf(page, page_num, page_width, page_height):
                         lineIndex += 1
                         lineWords = lines[lineIndex].split()
                         wordIndex = 0
-                        plumberText.append(plumberLine)
-                        plumberLine = []
-                word_sub_search_index = 0
+                        if plumberLine:
+                            plumberText.append(plumberLine)
+                            plumberLine = []
 
-            token_block_list_idx += 1
-            token_sub_search_index = 0
-        else:
-            # text word is a sub-part of block word ex. text: "word", block: "word__in___line"
-            token_sub_search_index += len(lineWords[wordIndex])
-            if wordIndex < len(lineWords) - 1:
-                wordIndex += 1
-            else:
-                if lineIndex < len(lines) - 1:
-                    lineIndex += 1
-                    lineWords = lines[lineIndex].split()
-                    wordIndex = 0
-                    if plumberLine:
-                        plumberText.append(plumberLine)
-                        plumberLine = []
+        if plumberLine:
+            plumberText.append(plumberLine)
 
-    if plumberLine:
-        plumberText.append(plumberLine)
-
-    blocks = []
-    blockIndex = -1
-    if plumberText:
-        for plumberLine in plumberText:
-            lineAndWordBlocks, blockIndex = plumber_line_to_blocks(page_num, plumberLine, blockIndex, page_width, page_height)
-            blocks.extend(lineAndWordBlocks)
+        blockIndex = -1
+        if plumberText:
+            for plumberLine in plumberText:
+                lineAndWordBlocks, blockIndex = plumber_line_to_blocks(page_num, plumberLine, blockIndex, page_width, page_height)
+                blocks.extend(lineAndWordBlocks)
     return blocks
 
 
@@ -227,14 +229,32 @@ def textract_block_to_block(page, tb, index, parent_index=-1):
     return block
 
 
-def blocks_from_scanned_pdf(pdf_bytes, page_number):
-    """Return a list of blocks from a scanned PDF."""
-    # print('blocks_from_scanned_pdf')
-    pdf_ppm_image_files = convert_from_bytes(pdf_bytes, poppler_path=POPPLER_PATH)
+def convert_to_png_bytes(pdf_bytes, page_number, dims):
+    """Convert PDF bytes to PNG bytes."""
+    pdf_ppm_image_files = convert_from_bytes(pdf_bytes, poppler_path=POPPLER_PATH, size=dims)
     pdf_page_ppm_image_file = pdf_ppm_image_files[page_number - 1]
     bytes_io_obj = BytesIO()
     pdf_page_ppm_image_file.save(bytes_io_obj, format='PNG')
-    png_byte_value = bytes_io_obj.getvalue()
+    return bytes_io_obj.getvalue()
+
+
+def resize_and_convert_to_bytes(pdf_bytes: bytes, page_number: int, dims=None):
+    """Return PNG bytes of a PDF, resizing if necessary to account for Textract API max limit."""
+    print(f"len of pdf_byte_value = {len(pdf_bytes)}")
+    png_byte_value = convert_to_png_bytes(pdf_bytes, page_number, dims=dims)
+    print(f"len of initial png_byte_value pre-resize = {len(png_byte_value)}")
+    filesize = len(png_byte_value)
+    if filesize > TEXTRACT_BYTE_LIMIT and dims:
+        ratio_change = TEXTRACT_BYTE_LIMIT / filesize
+        new_width = dims[0] * ratio_change
+        new_height = dims[1] * ratio_change
+        png_byte_value = convert_to_png_bytes(pdf_bytes, page_number, (new_width, new_height))
+    return png_byte_value
+
+
+def blocks_from_scanned_pdf(pdf_bytes, page_number, dims=None):
+    """Return a list of blocks from a scanned PDF."""
+    png_byte_value = resize_and_convert_to_bytes(pdf_bytes, page_number, dims=dims)
     print(f"len of png_byte_value = {len(png_byte_value)}")
     try:
         result = analyze_document(png_byte_value)
@@ -373,8 +393,16 @@ def lambda_handler(event, context):
     # Decide whether to extract blocks from input job's blocks S3 object or from PDF file
     if "primary-annotation-ref" in data_obj:
         primary_annotation_obj = json.loads(s3_to_bytes(s3, data_obj["primary-annotation-ref"]).decode('utf-8'))
-        pdf_blocks = primary_annotation_obj['Blocks']
-        is_native_pdf = primary_annotation_obj['DocumentType'] == 'NativePDF'
+        if not primary_annotation_obj['Blocks']:
+            print('Remove primary annotation ref as it contained no extracted blocks.')
+            del data_obj['primary-annotation-ref']
+
+            print(f'Attempting OCR with use-textract-only: {use_textract_only}')
+            pdf_blocks, is_native_pdf = get_pdf_blocks(pdf_bytes, page_num, use_textract_only)
+
+        else:
+            pdf_blocks = primary_annotation_obj['Blocks']
+            is_native_pdf = primary_annotation_obj['DocumentType'] == 'NativePDF'
     else:
         pdf_blocks, is_native_pdf = get_pdf_blocks(pdf_bytes, page_num, use_textract_only)
 

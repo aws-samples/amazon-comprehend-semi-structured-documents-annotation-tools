@@ -28,12 +28,12 @@ Resources:
   SemiStructuredDocumentsS3Bucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: 
+      BucketName:
         Fn::Sub: comprehend-semi-structured-documents-${AWS::Region}-${AWS::AccountId}
       VersioningConfiguration:
         Status: Enabled
-      BucketEncryption: 
-        ServerSideEncryptionConfiguration: 
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
         - ServerSideEncryptionByDefault:
             SSEAlgorithm: AES256
       CorsConfiguration:
