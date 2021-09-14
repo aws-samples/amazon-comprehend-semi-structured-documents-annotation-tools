@@ -8,7 +8,7 @@
 
 
 # How to Build, Package and Deploy
-
+The following instructions are for linux/Ubuntu/Mac. For windows, please install Cygwin and follow the same instructions
 ## Step 1: Run the following command to install [pipenv](https://pypi.org/project/pipenv/), [aws-sam-toolkit](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html), dependencies and setup virtualenv, etc.
 ```
 make bootstrap
