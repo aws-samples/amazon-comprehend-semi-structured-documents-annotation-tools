@@ -9,9 +9,11 @@ requests = "*"
 pdfplumber = "*"
 pdf2image = "*"
 flake8 = "*"
-autopep8 = "*"
 pydocstyle = "*"
 cfn-lint = "*"
+
+[dev-packages]
+autopep8 = "*"
 awscli = "*"
 pytest = "*"
 pytest-mock = "*"
