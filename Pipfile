@@ -8,8 +8,6 @@ boto3 = "*"
 requests = "*"
 pdfplumber = "*"
 pdf2image = "*"
-
-[dev-packages]
 flake8 = "*"
 autopep8 = "*"
 pydocstyle = "*"
