@@ -27,24 +27,30 @@ def get_doc_metadata(doc_metadata: dict) -> dict:
     return doc_metadata
 
 
-def get_annotations(annotation_map, s3_client):
+def get_annotations(annotation_map, s3_client, file_name):
     """Return a transformed annotations to be written."""
     blocks_entities_map = json.loads(annotation_map)
     page = blocks_entities_map.get("DocumentMetadata", {}).get("Page", "unknown")
+    annotation_file_name = get_annotation_file_name(file_name, page)
     return {
         "Version": blocks_entities_map.get("Version", "unknown"),
         "DocumentType": blocks_entities_map.get("DocumentType", "unknown"),
         "DocumentMetadata": get_doc_metadata(blocks_entities_map.get("DocumentMetadata", {})),
         "Blocks": get_blocks_from_s3_ref(blocks_entities_map.get('BlocksS3Ref', ''), s3_client),
-        "Entities": blocks_entities_map.get('Entities', [])
-    }, page
+        "Entities": blocks_entities_map.get('Entities', []),
+        "File": annotation_file_name
+    }
 
 
-def get_annotation_file_path(s3_ref: str, file_name: str, page: int):
+def get_annotation_file_name(file_name: str, page: int):
+    """Generate an annotation file name."""
+    return f"{S3Client.remove_extension(file_name)}-{page}-{str(uuid.uuid4())[:8]}-ann.json"
+
+
+def get_annotation_file_path(s3_ref: str, annotation_file_name):
     """Generate an annotation file path."""
     s3_output_path_prefix, iteration = os.path.split(os.path.split(s3_ref)[0])
-    return f"{os.path.split(s3_output_path_prefix)[0]}/consolidation-response/{iteration}/annotations/" \
-        f"{S3Client.remove_extension(file_name)}-{page}-{str(uuid.uuid4())[:8]}-ann.json"
+    return f"{os.path.split(s3_output_path_prefix)[0]}/consolidation-response/{iteration}/annotations/{annotation_file_name}"
 
 
 def write_annotations(annotations: Dict, annotation_file_path: str, s3_client):
@@ -68,9 +74,9 @@ def do_consolidation(payload, s3_client, labeling_job_arn, label_attribute_name,
                     annotation_list[0]["annotationData"]["content"]
                 )
                 if "document" in annotation_map:  # Workers can return empty responses
-                    annotations, page = get_annotations(annotation_map["document"], s3_client)
                     file_name = os.path.split(data_object_response["dataObject"]["s3Uri"])[1]
-                    annotation_file_path = get_annotation_file_path(s3_ref, file_name, page)
+                    annotations = get_annotations(annotation_map["document"], s3_client, file_name)
+                    annotation_file_path = get_annotation_file_path(s3_ref, annotations.get("File", ""))
                     #  write annotation file
                     write_annotations(annotations, annotation_file_path, s3_client)
 

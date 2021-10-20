@@ -1,5 +1,5 @@
 # Comprehend SSIE Annotation Tool
-
+ 
 # Step 0: Prerequisites
 * Install python3.8.x (e.g. You can use [pyenv](https://github.com/pyenv/pyenv) for python version management)
 * Install [jq](https://stedolan.github.io/jq/download/)
@@ -8,7 +8,7 @@
 
 
 # How to Build, Package and Deploy
-The following instructions are for linux/Ubuntu/Mac. For windows, please install Cygwin and follow the same instructions
+
 ## Step 1: Run the following command to install [pipenv](https://pypi.org/project/pipenv/), [aws-sam-toolkit](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html), dependencies and setup virtualenv, etc.
 ```
 make bootstrap
@@ -24,10 +24,10 @@ make build
 Run the following command package the CloudFormation template to be ready for CloudFormation deployment, and follow iteractive guidance for deployment.
 This CloudFormation stack will manage the created lambdas, IAM roles and S3 bucket. (IMPORTANT: Keep note of the CloudFormation name as that will be used later)
 ```
-make deploy-guided
+make deploy-guided 
 ```
 
-Note:
+Note: 
 - Alternatively, you can use run ```make deploy``` if there is a local samconfig.toml file
 - To deploy to different region using different credentials. You can specify *AWS_PROFILE* and *AWS_REGION* option. e.g. ```make deploy-guided AWS_PROFILE=<profile-name> AWS_REGION=<aws-region-name>```
 - The CloudFormation allows you to override the following Parameters. To specify the override values, you can run the following command: ```make deploy PRE_HUMAN_LAMBDA_TIMEOUT_IN_SECONDS=600 CONSOLIDATION_LAMBDA_TIMEOUT_IN_SECONDS=600```:
@@ -43,7 +43,7 @@ IMPORTANT: Make sure you are in the pipenv shell by running `pipenv shell`. You 
 ## Step 1: [One-time setup] Create a Private Workforce for Future Labeling Jobs
 Please refer to [official SageMaker Ground Truth Guide](https://docs.aws.amazon.com/sagemaker/latest/dg/sms-workforce-private-use-cognito.html) to create a private workforce, and record the corresponding workteam ARN (e.g. arn:aws:sagemaker:{AWS_REGION}:{AWS_ACCOUNT_ID}:workteam/private-crowd/{WORKFORCE_TEAM_ARN})
 
-## Step 2: Upload Source Semi-Structured Documents to S3 bucket
+## Step 2: Upload Source Semi-Structured Documents to S3 bucket 
 From the `How to Build, Package and Deploy` Section, a CloudFormation stack has been deployed, which contains an S3 bucket. This bucket is used to store all data that is needed for the Labeling job, and it is also referred to by the Lambda IAM Execution Role policy to ensure Lambda functions have necessary permission to access the data. The S3 bucket Name can be easily found in CloudFormation Stack Outputs with Key of `SemiStructuredDocumentsS3Bucket`.
 
 You need to upload the source Semi-Structure Documents into this Bucket. Here is a sample AWS CLI command you can use to upload source documents from local directory to S3 bucket:
@@ -57,7 +57,7 @@ aws s3 cp --recursive <local-path-to-source-docs> s3://comprehend-semi-structure
 ```
 
 ## Step 3: Create the labeling job
-`comprehend-ssie-annotation-tool-cli.py` under bin/ directory is a simple wrapper command that can be used streamline the creation of SageMaker GroundTruth Job. Under the hood, this CLI script will read the source documents from S3 path that you specify as an argument, create a corresponding input manifest file with a single page of one source document per line, and the input Manifest file is then used as input to the Labeling Job. In addition, you also provide a list of Entity types that you define which will become the visible types in GroundTruth UI for Annotators to label each page of the document. The following is an example of using the CLI to start a labeling job:
+`comprehend-ssie-annotation-tool-cli.py` under bin/ directory is a simple wrapper command that can be used streamline the creation of SageMaker GroundTruth Job. Under the hood, this CLI script will read the source documents from S3 path that you specify as an argument, create a corresponding input manifest file with a single page of one source document per line, and the input Manifest file is then used as input to the Labeling Job. In addition, you also provide a list of Entity types that you define which will become the visible types in GroundTruth UI for Annotators to label each page of the document. The following is an example of using the CLI to start a labeling job: 
 - input-s3-path: S3 Uri to the source documents you copied earlier in `Upload Source Semi-Structured Documents to S3 bucket`
 - cfn-name: The name of the CloudFormation stack name entered in the `Package and Deploy` step.
 - work-team-name: The workforce name created from `[One-time setup] Create a Private Workforce for Future Labeling Jobs`
@@ -77,15 +77,28 @@ python bin/comprehend-ssie-annotation-tool-cli.py \
 The job has now been created an can be accessed the Sagemaker labeling portal.
 
 
-For more information about the CLI options, use the `-h` option. e.g.
+For more information about the CLI options, use the `-h` option. e.g. 
 ```
-python bin/comprehend-ssie-annotation-tool-cli.py -h
+python bin/comprehend-ssie-annotation-tool-cli.py -h 
 ```
 
 Additional customizable options:
-1. Specify `--use-textract-only` flag to instruct the annotation tool to only use [Amazon Textract AnalyzeDocument API](https://docs.aws.amazon.com/textract/latest/dg/API_AnalyzeDocument.html) to parse the PDF document. By default, the tool tries to auto-detect what types of source PDF document format is, and use either [PDFPlumber](https://github.com/jsvine/pdfplumber) or Textract to parse the PDF Documents.
+1. Specify `--use-textract-only` flag to instruct the annotation tool to only use [Amazon Textract AnalyzeDocument API](https://docs.aws.amazon.com/textract/latest/dg/API_AnalyzeDocument.html) to parse the PDF document. By default, the tool tries to auto-detect what types of source PDF document format is, and use either [PDFPlumber](https://github.com/jsvine/pdfplumber) or Textract to parse the PDF Documents. 
 2. Include `--annotator-metadata` parameter to reveal key-value information to annotators. Default metadata about the document is already revealed to the annotator within the UI side panel.
-3. For better annotation accuracy, we also expose the option to do more than 1 blind pass (blind1/blind2) in the CLI command of annotation through your dataset, which is equivalent to 2 workers per dataset object in Sagemaker GroundTruth. You can run a verification job comparing these 2 annotations to create the final set. The verification job can also be run after a single blind pass of annotation.
+3. Include `--no-suffix` parameter to indicate to only use `--job-name-prefix` for the job name. By default, a unique ID is suffixed to the `--job-name-prefix`.
+4. Include `--task-time-limit` parameter to indicate a desired time limit in seconds for each task in the Sagemaker GroundTruth labeling job. By default, the time limit is set to 3600 seconds or 1 hour.
+5. To edit/verify previous annotations, we also expose a "verification" feature. Omit `--input-s3-path` and `--entity-types` from the labeling job creation script, and include `--blind1-labeling-job-name` which should be the name of the previous annotation's job name.
+    ```
+    AWS_REGION=`aws configure get region`;
+    AWS_ACCOUNT_ID=`aws sts get-caller-identity | jq -r '.Account'`;
+    python bin/comprehend-ssie-annotation-tool-cli.py \
+        --cfn-name comprehend-semi-structured-documents-annotation-template \
+        --work-team-name <private-work-team-name> \
+        --region ${AWS_REGION} \
+        --job-name-prefix "${USER}-job" \
+        --blind1-labeling-job-name <sagemaker-blind1-labeling-job-name>
+    ```
+6. For better annotation accuracy, we also expose the option to do more than 1 blind pass (blind1/blind2) in the CLI command of annotation through your dataset, which is equivalent to 2 workers per dataset object in Sagemaker GroundTruth. You can run a verification job comparing these 2 annotations to create the final set. The verification job can also be run after a single blind pass of annotation.
     - To start a verification job, omit `input-s3-path` and `entity-types` and include `blind1-labeling-job-name` and `blind2-labeling-job-name`. The verification job will use the document and entity types from the blind1 (and blind2) jobs.
         ```
         AWS_REGION=`aws configure get region`;
@@ -98,3 +111,6 @@ Additional customizable options:
             --blind1-labeling-job-name <sagemaker-blind1-labeling-job-name> \
             --blind2-labeling-job-name <sagemaker-blind2-labeling-job-nam>
         ```
+
+
+

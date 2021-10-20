@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT-0
 
 """Pre Human Lambda function handler."""
+from enum import Enum
 import json
 import boto3
 import pdfplumber
@@ -20,13 +21,18 @@ TOTAL_IMAGE_SIZE_TO_PAGE_SIZE_RATIO_THREASHOLD = 0.25
 POPPLER_PATH = '/opt/bin/'
 
 
-def s3_to_bytes(s3, s3_ref):
+class PDFType(Enum):
+    """Enum class for PDF types."""
+
+    ScannedPDF = "ScannedPDF"
+    NativePDF = "NativePDF"
+
+
+def get_s3_object(s3, s3_ref):
     """Return the bytes for an S3 reference undecoded."""
     bucket, key = S3Client.bucket_key_from_s3_uri(s3_ref)
     try:
-        response = s3.get_object(Bucket=bucket, Key=key)
-        payload = response['Body'].read()
-        return payload
+        return s3.get_object(Bucket=bucket, Key=key)
     except Exception as e:
         print(e)
         print('Error getting object {} from bucket {}. '
@@ -85,9 +91,7 @@ def output_pdf_temp_file_to_s3(s3, source_ref: str, content: Union[str, list], p
 
 def get_temp_folder_bucket_key_from_s3_uri(s3_ref: str, job_id: str):
     """Get the temporary file folder name from an S3 reference and return the folder name and its bucket."""
-    bucket, pdf_key = S3Client.bucket_key_from_s3_uri(s3_ref)
-    # parts = pdf_key.split('/')
-    # folder_key = f"{'/'.join(parts[0:-2])}intermediate-files"
+    bucket, _ = S3Client.bucket_key_from_s3_uri(s3_ref)
     folder_key = f"comprehend-semi-structured-docs-intermediate-output/{job_id}"
     return bucket, folder_key
 
@@ -384,45 +388,68 @@ def lambda_handler(event, context):
     use_textract_only = metadata["use-textract-only"] if "use-textract-only" in metadata else False
     metadata["use-textract-only"] = "true" if use_textract_only else "false"
 
+    # create low-level S3 client
     s3 = boto3.client('s3')
 
-    pdf_bytes = s3_to_bytes(s3, source_ref)
+    pdf_s3_resp = get_s3_object(s3, source_ref)
+    pdf_bytes = pdf_s3_resp['Body'].read()
     print(f"pdf_bytes length = {len(pdf_bytes)}")
     pdf_page_base64 = base64.b64encode(pdf_bytes)
+    do_ocr = True
 
-    # Decide whether to extract blocks from input job's blocks S3 object or from PDF file
-    if "primary-annotation-ref" in data_obj:
-        primary_annotation_obj = json.loads(s3_to_bytes(s3, data_obj["primary-annotation-ref"]).decode('utf-8'))
-        if not primary_annotation_obj['Blocks']:
-            print('Remove primary annotation ref as it contained no extracted blocks.')
-            del data_obj['primary-annotation-ref']
+    # Decide whether to extract blocks from input jobs' blocks or from PDF file
+    primary_annotation_ref = data_obj.get("primary-annotation-ref")
+    if primary_annotation_ref:
+        do_ocr = False
+        primary_annotation_s3_resp = get_s3_object(s3, primary_annotation_ref)
 
-            print(f'Attempting OCR with use-textract-only: {use_textract_only}')
-            pdf_blocks, is_native_pdf = get_pdf_blocks(pdf_bytes, page_num, use_textract_only)
+        # use pdf blocks from most recently modified annotation file
+        secondary_annotation_ref = data_obj.get("secondary-annotation-ref")
+        if secondary_annotation_ref:
+            secondary_annotation_s3_resp = get_s3_object(s3, secondary_annotation_ref)
 
+            primary_annotation_date = primary_annotation_s3_resp["LastModified"]
+            secondary_annotation_date = secondary_annotation_s3_resp["LastModified"]
+
+            if primary_annotation_date >= secondary_annotation_date:
+                annotation_bytes = primary_annotation_s3_resp["Body"].read()
+            else:
+                annotation_bytes = secondary_annotation_s3_resp["Body"].read()
+
+                # set most recent annotation file as primary annotation reference
+                data_obj['primary-annotation-ref'], data_obj['secondary-annotation-ref'] = data_obj['secondary-annotation-ref'], data_obj['primary-annotation-ref']
         else:
-            pdf_blocks = primary_annotation_obj['Blocks']
-            is_native_pdf = primary_annotation_obj['DocumentType'] == 'NativePDF'
-    else:
+            annotation_bytes = primary_annotation_s3_resp["Body"].read()
+
+        annotation_obj = json.loads(annotation_bytes.decode('utf-8'))
+
+        if "Blocks" in annotation_obj:
+            pdf_blocks = annotation_obj["Blocks"]
+            is_native_pdf = annotation_obj.get("DocumentType", PDFType.NativePDF.name) == PDFType.NativePDF.name
+        else:
+            print('Remove annotation references as no extracted blocks are found in the latest annotation file.')
+            data_obj.pop("primary-annotation-ref", None)
+            data_obj.pop("secondary-annotation-ref", None)
+            do_ocr = True
+
+    if do_ocr:
+        print(f'Attempting OCR with use-textract-only: {use_textract_only}')
         pdf_blocks, is_native_pdf = get_pdf_blocks(pdf_bytes, page_num, use_textract_only)
 
+    # create intermediate files and write to S3
     pdf_base64_s3_ref = output_pdf_temp_file_to_s3(s3, source_ref, pdf_page_base64, page_num, job_id)
     pdf_block_s3_ref = output_pdf_temp_file_to_s3(s3, source_ref, pdf_blocks, page_num, job_id)
 
     task_object = {
         "pdfBase64S3Ref": pdf_base64_s3_ref,
         "pdfBlocksS3Ref": pdf_block_s3_ref,
-        "pdfType": "NativePDF" if is_native_pdf else "ScannedPDF",
+        "pdfType": PDFType.NativePDF.name if is_native_pdf else PDFType.ScannedPDF.name,
         "version": VERSION,
         "metadata": metadata,
-        "annotatorMetadata": data_obj["annotator-metadata"] if "annotator-metadata" in data_obj else None
+        "annotatorMetadata": data_obj["annotator-metadata"] if "annotator-metadata" in data_obj else None,
+        "primaryAnnotationS3Ref": data_obj.get("primary-annotation-ref"),
+        "secondaryAnnotationS3Ref": data_obj.get("secondary-annotation-ref")
     }
-
-    # Set primary and secondary annotation S3 references for UI to use
-    if "primary-annotation-ref" in data_obj:
-        task_object["primaryAnnotationS3Ref"] = data_obj["primary-annotation-ref"]
-        if "secondary-annotation-ref" in data_obj:
-            task_object["secondaryAnnotationS3Ref"] = data_obj["secondary-annotation-ref"]
 
     print(task_object)
 

@@ -259,6 +259,8 @@ def main():
     parser.add_argument('--blind1-labeling-job-name', type=str, help='Blind1 labeling job name to use for arbitration or iteration')
     parser.add_argument('--blind2-labeling-job-name', type=str, help='Blind2 labeling job name to use for arbitration')
     parser.add_argument('--schema-path', type=str, help='Local path to schema file to use for the labeling job which will overwrite --entity-types. Usage: --annotation-schema /home/user1/schema.json')
+    parser.add_argument('--no-suffix', action='store_true', help='Flag to indicate to only use job-name-prefix for job name. Otherwise, a unique ID will be appended to the job-name-prefix.')
+    parser.add_argument('--task-time-limit', type=int, default=3600, help='Time limit in seconds given for each task (default: 3600). Usage (for 2 hours): --task-time-limit 7200')
 
     args = parser.parse_args()
 
@@ -295,6 +297,20 @@ def main():
     s3_resource = session.resource('s3')
     sagemaker_client = session.client('sagemaker')
 
+    now = datetime.datetime.utcnow()
+    now_str = now.strftime('%Y%m%dT%H%M%S')
+    job_name_prefix = args.job_name_prefix
+    if args.no_suffix:
+        ground_truth_labeling_job_name = job_name_prefix
+        try:
+            describe_sagemaker_labeling_job(sagemaker_client, ground_truth_labeling_job_name)
+            print(f'{ground_truth_labeling_job_name} already exists. Please use a different job name.')
+            return
+        except Exception:
+            pass
+    else:
+        ground_truth_labeling_job_name =  f'{job_name_prefix}-labeling-job-{now_str}'
+
     generated_data = generate_manifests_and_schema(
         s3_client,
         s3_resource,
@@ -309,10 +325,6 @@ def main():
         return
     manifest_json_list, schema_content = generated_data
 
-    now = datetime.datetime.utcnow()
-    now_str = now.strftime('%Y%m%dT%H%M%S')
-    job_name_prefix = args.job_name_prefix
-    ground_truth_labeling_job_name =  f'{job_name_prefix}-labeling-job-{now_str}'
     input_manifest_path = f's3://{ssie_documents_s3_bucket}/input-manifest/{ground_truth_labeling_job_name}.manifest'
     write_jsonl(
         input_manifest_path,
@@ -348,10 +360,10 @@ def main():
             'UiTemplateS3Uri': ui_template_path
         },
         'PreHumanTaskLambdaArn': gt_pre_human_task_lambda_function,
-        'TaskTitle': f'{job_name_prefix}-labeling-job-task-{now_str}',
-        'TaskDescription': f'{job_name_prefix}-labeling-job-task-{now_str}',
+        'TaskTitle': ground_truth_labeling_job_name,
+        'TaskDescription': ground_truth_labeling_job_name,
         'NumberOfHumanWorkersPerDataObject': 1,
-        'TaskTimeLimitInSeconds': 3600,
+        'TaskTimeLimitInSeconds': args.task_time_limit,
         'TaskAvailabilityLifetimeInSeconds': 864000,
         'AnnotationConsolidationConfig': {
             'AnnotationConsolidationLambdaArn': gt_annotation_consolidation_lambda_function
