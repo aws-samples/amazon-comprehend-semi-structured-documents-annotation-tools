@@ -1,4 +1,4 @@
-# Comprehend SSIE Annotation Tool
+# Comprehend Semi-Structured Documents Annotation Tool
  
 # Step 0: Prerequisites
 * Install python3.8.x (e.g. You can use [pyenv](https://github.com/pyenv/pyenv) for python version management)
