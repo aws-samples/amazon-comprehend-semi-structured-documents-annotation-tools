@@ -92,7 +92,7 @@ Additional customizable options:
     AWS_REGION=`aws configure get region`;
     AWS_ACCOUNT_ID=`aws sts get-caller-identity | jq -r '.Account'`;
     python bin/comprehend-ssie-annotation-tool-cli.py \
-        --cfn-name comprehend-semi-structured-documents-annotation-template \
+        --cfn-name sam-app \
         --work-team-name <private-work-team-name> \
         --region ${AWS_REGION} \
         --job-name-prefix "${USER}-job" \
