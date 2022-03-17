@@ -8,9 +8,6 @@ boto3 = "*"
 requests = "*"
 pdfplumber = "*"
 pdf2image = "*"
-flake8 = "*"
-pydocstyle = "*"
-cfn-lint = "*"
 
 [dev-packages]
 autopep8 = "*"
@@ -18,6 +15,9 @@ awscli = "*"
 pytest = "*"
 pytest-mock = "*"
 pytest-cov = "*"
+flake8 = "*"
+pydocstyle = "*"
+cfn-lint = "*"
 
 [requires]
 python_version = "3.8"
