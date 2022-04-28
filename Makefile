@@ -44,7 +44,7 @@ bootstrap:
 	$(PYTHON) -m $(PIP) install aws-sam-cli
 	$(PYTHON) -m $(PIP) install pipenv
 	$(PYTHON) -m $(PIP) install awscli 
-	pipenv sync # Install locked dependencies
+	pipenv sync --dev # Install locked dependencies, including dev-dependencies
 	pipenv shell
 
 # Activate
