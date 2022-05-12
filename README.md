@@ -33,6 +33,8 @@ Note:
 - The CloudFormation allows you to override the following Parameters. To specify the override values, you can run the following command: ```make deploy PRE_HUMAN_LAMBDA_TIMEOUT_IN_SECONDS=600 CONSOLIDATION_LAMBDA_TIMEOUT_IN_SECONDS=600```:
     1. *PRE_HUMAN_LAMBDA_TIMEOUT_IN_SECONDS*: The timeout value for PreHumanLambda to execute. Default to be 300 seconds
     2. *CONSOLIDATION_LAMBDA_TIMEOUT_IN_SECONDS*: The timeout value for Consolidation Lambda to execute. Default to be 300 seconds
+    3. *PRE_HUMAN_LAMBDA_MEMORY_IN_MB*: The memory value for PreHumanLambda to execute. Default to be 10240 MB
+    4. *CONSOLIDATION_LAMBDA_MEMORY_IN_MB*: The memory value for Consolidation Lambda to execute. Default to be 10240MB
 - To update dependencies in the Pipfile, run `make update` and continue to `Step 2: Build`.
 
 

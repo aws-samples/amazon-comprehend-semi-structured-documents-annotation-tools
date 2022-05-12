@@ -23,6 +23,18 @@ Parameters:
     Default: 300
     MaxValue: 900
     Description: Timeout in seconds for ConsolidationLambba. Default is 300.
+  PreHumanLambdaMemoryInMB:
+    Type: Number
+    Default: 10240
+    MinValue: 128
+    MaxValue: 10240
+    Description: Memory in MB for PreHumanLambba. Default is 10240.
+  ConsolidationLambdaMemoryInMB:
+    Type: Number
+    Default: 10240
+    MinValue: 128
+    MaxValue: 10240
+    Description: Memory in MB for ConsolidationLambba. Default is 10240.
 
 Resources:
   SemiStructuredDocumentsS3Bucket:
@@ -154,7 +166,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: pre_human_task_lambda.lambda_handler
-      MemorySize: 10240
+      MemorySize: !Ref PreHumanLambdaMemoryInMB
       Role:
         Fn::GetAtt: [GTPreHumanTaskLambdaExecutionRole, Arn]
       CodeUri: src
@@ -167,7 +179,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: annotation_consolidation_lambda.lambda_handler
-      MemorySize: 10240
+      MemorySize: !Ref ConsolidationLambdaMemoryInMB
       Role: !GetAtt GTAnnotationConsolidationLambdaExecutionRole.Arn
       CodeUri: src
       Runtime: python3.8
