@@ -53,7 +53,7 @@ You need to upload the source Semi-Structure Documents into this Bucket. Here is
 ```
 AWS_REGION=`aws configure get region`;
 AWS_ACCOUNT_ID=`aws sts get-caller-identity | jq -r '.Account'`;
-aws s3 cp --recursive <local-path-to-source-docs> s3://comprehend-semi-structured-documents-${AWS_REGION}-${AWS_ACCOUNT_ID}/<source-folder-name>/
+aws s3 cp --recursive <local-path-to-source-docs> s3://comprehend-semi-structured-docs-${AWS_REGION}-${AWS_ACCOUNT_ID}/<source-folder-name>/
 ```
 
 ## Step 3: Create the labeling job
@@ -67,7 +67,7 @@ aws s3 cp --recursive <local-path-to-source-docs> s3://comprehend-semi-structure
 AWS_REGION=`aws configure get region`;
 AWS_ACCOUNT_ID=`aws sts get-caller-identity | jq -r '.Account'`;
 python bin/comprehend-ssie-annotation-tool-cli.py \
-    --input-s3-path s3://comprehend-semi-structured-documents-${AWS_REGION}-${AWS_ACCOUNT_ID}/<source-folder-name>/ \
+    --input-s3-path s3://comprehend-semi-structured-docs-${AWS_REGION}-${AWS_ACCOUNT_ID}/<source-folder-name>/ \
     --cfn-name sam-app \
     --work-team-name <private-work-team-name> \
     --region ${AWS_REGION} \
@@ -111,6 +111,4 @@ Additional customizable options:
             --blind1-labeling-job-name <sagemaker-blind1-labeling-job-name> \
             --blind2-labeling-job-name <sagemaker-blind2-labeling-job-nam>
         ```
-
-
 
