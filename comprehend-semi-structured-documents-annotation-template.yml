@@ -29,7 +29,7 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: 
-        Fn::Sub: comprehend-semi-structured-documents-${AWS::Region}-${AWS::AccountId}
+        Fn::Sub: comprehend-semi-structured-docs-${AWS::Region}-${AWS::AccountId}
       VersioningConfiguration:
         Status: Enabled
       BucketEncryption: 
