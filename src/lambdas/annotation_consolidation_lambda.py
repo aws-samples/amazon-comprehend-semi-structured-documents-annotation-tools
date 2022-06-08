@@ -5,14 +5,15 @@
 import json
 import os
 from datetime import datetime
-from s3_helper import S3Client
 from typing import List, Dict
 import uuid
 
+from utils.s3_helper import S3Client
+from type.semi_structured_annotation import SemiStructuredAnnotation
 
-def get_blocks_from_s3_ref(blocks_s3_ref: str, s3_client) -> list:
-    """Return a list of blocks from an S3 reference file."""
-    blocks = json.loads(s3_client.get_object_from_s3(blocks_s3_ref))
+
+def remove_block_indices_from_blocks(blocks: List[dict]):
+    """Remove parentBlockIndex and blockIndex from blocks."""
     for b in blocks:
         if 'parentBlockIndex' in b:
             del b['parentBlockIndex']
@@ -21,45 +22,40 @@ def get_blocks_from_s3_ref(blocks_s3_ref: str, s3_client) -> list:
     return blocks
 
 
-def get_doc_metadata(doc_metadata: dict) -> dict:
-    """Return the document metadata object with the Page property parsed out."""
-    doc_metadata.pop("Page", None)
-    return doc_metadata
+def get_blocks_from_s3_ref(blocks_s3_ref: str, s3_client: S3Client) -> List:
+    """Return a list of blocks from an S3 reference file."""
+    blocks = [] if not blocks_s3_ref else json.loads(s3_client.get_object_content_from_s3(blocks_s3_ref))
+    return remove_block_indices_from_blocks(blocks)
 
 
-def get_annotations(annotation_map, s3_client, file_name):
-    """Return a transformed annotations to be written."""
-    blocks_entities_map = json.loads(annotation_map)
-    page = blocks_entities_map.get("DocumentMetadata", {}).get("Page", "unknown")
-    annotation_file_name = get_annotation_file_name(file_name, page)
-    return {
-        "Version": blocks_entities_map.get("Version", "unknown"),
-        "DocumentType": blocks_entities_map.get("DocumentType", "unknown"),
-        "DocumentMetadata": get_doc_metadata(blocks_entities_map.get("DocumentMetadata", {})),
-        "Blocks": get_blocks_from_s3_ref(blocks_entities_map.get('BlocksS3Ref', ''), s3_client),
-        "Entities": blocks_entities_map.get('Entities', []),
-        "File": annotation_file_name
-    }
+def get_annotation_obj(annotation_obj_str: str, s3_client: S3Client, file_name: str) -> SemiStructuredAnnotation:
+    """Return a transformed annotations object to be written."""
+    annotation_obj = SemiStructuredAnnotation(**json.loads(annotation_obj_str))
+    annotation_obj.Blocks = get_blocks_from_s3_ref(annotation_obj.BlocksS3Ref, s3_client)
+    page_number = annotation_obj.DocumentMetadata.PageNumber
+    annotation_file_name = get_annotation_file_name(file_name, page_number)
+    annotation_obj.File = annotation_file_name
+    return annotation_obj
 
 
-def get_annotation_file_name(file_name: str, page: int):
+def get_annotation_file_name(file_name: str, page_number: str):
     """Generate an annotation file name."""
-    return f"{S3Client.remove_extension(file_name)}-{page}-{str(uuid.uuid4())[:8]}-ann.json"
+    return f"{S3Client.remove_extension(file_name)}-{str(page_number)}-{str(uuid.uuid4())[:8]}-ann.json"
 
 
-def get_annotation_file_path(s3_ref: str, annotation_file_name):
+def get_annotation_file_path(s3_ref: str, annotation_file_name: str):
     """Generate an annotation file path."""
     s3_output_path_prefix, iteration = os.path.split(os.path.split(s3_ref)[0])
     return f"{os.path.split(s3_output_path_prefix)[0]}/consolidation-response/{iteration}/annotations/{annotation_file_name}"
 
 
-def write_annotations(annotations: Dict, annotation_file_path: str, s3_client):
+def write_annotations(annotations_obj: SemiStructuredAnnotation, annotation_file_path: str, s3_client: S3Client):
     """Given a s3 path of consolidation request json, return a s3 folder we use to save annotations."""
-    s3_client.write_content(annotation_file_path, json.dumps(annotations))
+    s3_client.write_content(s3_path=annotation_file_path, content=json.dumps(annotations_obj.dict()))
     print(f"Wrote annotations to {annotation_file_path}")
 
 
-def do_consolidation(payload, s3_client, labeling_job_arn, label_attribute_name, s3_ref):
+def do_consolidation(payload: List[Dict], s3_client: S3Client, labeling_job_arn: str, label_attribute_name: str, s3_ref: str):
     """Consolidation methods for converting gt output to uf format."""
     consolidated_output = []
 
@@ -75,10 +71,10 @@ def do_consolidation(payload, s3_client, labeling_job_arn, label_attribute_name,
                 )
                 if "document" in annotation_map:  # Workers can return empty responses
                     file_name = os.path.split(data_object_response["dataObject"]["s3Uri"])[1]
-                    annotations = get_annotations(annotation_map["document"], s3_client, file_name)
-                    annotation_file_path = get_annotation_file_path(s3_ref, annotations.get("File", ""))
+                    annotations_obj = get_annotation_obj(annotation_map["document"], s3_client, file_name)
+                    annotation_file_path = get_annotation_file_path(s3_ref, annotations_obj.File)
                     #  write annotation file
-                    write_annotations(annotations, annotation_file_path, s3_client)
+                    write_annotations(annotations_obj, annotation_file_path, s3_client)
 
             #  return reference to s3
             response = {
@@ -105,6 +101,8 @@ def do_consolidation(payload, s3_client, labeling_job_arn, label_attribute_name,
         except Exception as e:
             print(f'An Error occurred in do_consolidation function: {e}')
 
+    print(consolidated_output)
+
     return consolidated_output
 
 
@@ -122,7 +120,7 @@ def lambda_handler(event, context):
             "labelingJobArn": <labelingJobArn>,
             "labelCategories": [<string>],  # If you created labeling job using aws console, labelCategories will be null
             "labelAttributeName": <string>,
-            "roleArn" : "string",
+            "roleArn" : "string", # SageMakerExecutionRole
             "payload": {
                 "s3Uri": <string>
             }
@@ -175,19 +173,14 @@ def lambda_handler(event, context):
     labeling_job_arn = event["labelingJobArn"]
     label_attribute_name = event["labelAttributeName"]
 
-    role_arn = None
-    if "roleArn" in event:
-        role_arn = event["roleArn"]
-
-    # Create s3 client object
-    s3_client = S3Client(role_arn)
-
     payload = event["payload"]
+
+    s3_client = S3Client()
 
     s3_ref = None
     if "s3Uri" in payload:
         s3_ref = payload["s3Uri"]
-        payload = json.loads(s3_client.get_object_from_s3(s3_ref))
+        payload = json.loads(s3_client.get_object_content_from_s3(s3_ref))
 
     # Perform consolidation
     return do_consolidation(payload, s3_client, labeling_job_arn, label_attribute_name, s3_ref)

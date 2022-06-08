@@ -2,79 +2,72 @@
 # SPDX-License-Identifier: MIT-0
 
 """Pre Human Lambda function handler."""
-from enum import Enum
 import json
-import boto3
-import pdfplumber
 import os
 import base64
 from io import BytesIO
-from pdf2image import convert_from_bytes
-from s3_helper import S3Client
-from typing import Union
-from block_helper import JSONHandler, Geometry, Block, Relationship
+from typing import List, Union
+import traceback
+
+import pdfplumber
+
+from utils.s3_helper import S3Client
+from utils.block_helper import JSONHandler, Geometry, Block, Relationship
+from constants import general
+from type.semi_structured_annotation import SemiStructuredAnnotation, SemiStructuredDocumentType
+from utils.textract_helper import TextractClient
+from utils.pdf_utils import convert_pdf_to_png_bytes
 
 
-TEXTRACT_BYTE_LIMIT = 5000000
-VERSION = "2021-04-30"
-TOTAL_IMAGE_SIZE_TO_PAGE_SIZE_RATIO_THREASHOLD = 0.25
-POPPLER_PATH = '/opt/bin/'
-
-
-class PDFType(Enum):
-    """Enum class for PDF types."""
-
-    ScannedPDF = "ScannedPDF"
-    NativePDF = "NativePDF"
-
-
-def get_s3_object(s3, s3_ref):
-    """Return the bytes for an S3 reference undecoded."""
-    bucket, key = S3Client.bucket_key_from_s3_uri(s3_ref)
-    try:
-        return s3.get_object(Bucket=bucket, Key=key)
-    except Exception as e:
-        print(e)
-        print('Error getting object {} from bucket {}. '
-              'Make sure they exist and your bucket is in the same region as this function.'.format(key, bucket))
-        raise e
-
-
-def is_scanned_pdf(images, page_width, page_height):
+def is_scanned_pdf(images, page_width: float, page_height: float):
     """Return whether a PDF is a scanned PDF given its images and page dimensions."""
     page_size = page_width * page_height
     if len(images) >= 1:
         print(f'Total number of images in a single PDF page {len(images)}')
         image_size_total = 0
         for image in images:
-            image_size_total += image['width'] * image['height']
+            image_size_total += float(image['width']) * float(image['height'])
         image_size_to_page_size_ratio = image_size_total / page_size
-        print(f"image_size_total = {image_size_total}, page_size = {page_size}, ratio = {image_size_to_page_size_ratio}, threshold = {TOTAL_IMAGE_SIZE_TO_PAGE_SIZE_RATIO_THREASHOLD}")
-        return image_size_to_page_size_ratio >= TOTAL_IMAGE_SIZE_TO_PAGE_SIZE_RATIO_THREASHOLD
+        print(f"image_size_total = {image_size_total}, page_size = {page_size}, ratio = {image_size_to_page_size_ratio}, threshold = {general.TOTAL_IMAGE_SIZE_TO_PAGE_SIZE_RATIO_THRESHOLD}")
+        return image_size_to_page_size_ratio >= general.TOTAL_IMAGE_SIZE_TO_PAGE_SIZE_RATIO_THRESHOLD
     else:
         return False
 
 
-def get_pdf_blocks(pdf_bytes, page_num, use_textract_only):
+def get_pdf_blocks(pdf_bytes: bytes, page_num: int, use_textract_only: bool, source_ref: str, textract_client: TextractClient, poppler_path=general.POPPLER_PATH):
     """Get the Block objects from a PDF and also return it's type."""
     bytes_io_obj = BytesIO(pdf_bytes)
     blocks = []
-    is_native_pdf = True
-    with pdfplumber.open(bytes_io_obj) as pdf:
-        page = pdf.pages[page_num - 1]
-        width, height = page.width, page.height
+    is_native_pdf = False
 
-        if use_textract_only or is_scanned_pdf(page.images, width, height):
-            print(f"use_textract_only = {use_textract_only} or Scanned PDF. getting blocks from textract")
-            blocks = blocks_from_scanned_pdf(pdf_bytes, page_num, dims=(float(width), float(height)))
-            is_native_pdf = False
-        else:
-            print(f"use_textract_only = {use_textract_only} or Native PDF, getting blocks from pdf parser")
-            blocks = blocks_from_native_pdf(page, page_num, width, height)
+    # Outer try-catch is use for catching any errors with PDF (.open, .pages) or Page (.images, .extract_text, .extract_word) methods
+    #   https://github.com/jsvine/pdfplumber/blob/ecc9e8e16dfc2cfc1fef0749ddb75198ab6594d4/pdfplumber/pdf.py
+    #   https://github.com/jsvine/pdfplumber/blob/stable/pdfplumber/page.py
+    try:
+        with pdfplumber.open(bytes_io_obj) as pdf:
+            page = pdf.pages[page_num - 1]
+            width, height = float(page.width), float(page.height)
+
+            if use_textract_only or is_scanned_pdf(page.images, width, height):
+                print(f"use_textract_only = {use_textract_only} or Scanned PDF. getting blocks from textract")
+                blocks = blocks_from_scanned_pdf(
+                    pdf_bytes,
+                    page_num,
+                    poppler_path=poppler_path,
+                    textract_client=textract_client
+                )
+            else:
+                print(f"use_textract_only = {use_textract_only} or Native PDF, getting blocks from pdf parser")
+                blocks = blocks_from_native_pdf(page, page_num, width, height)
+                is_native_pdf = True
+    except Exception:
+        print(f"Exception occurred opening {source_ref}, treating as Textract use-case")
+        traceback.print_exc()  # print stacktrace
+        blocks = blocks_from_scanned_pdf(pdf_bytes, page_num, poppler_path=poppler_path, textract_client=textract_client)
     return blocks, is_native_pdf
 
 
-def output_pdf_temp_file_to_s3(s3, source_ref: str, content: Union[str, list], page_num: int, job_id: str):
+def output_pdf_temp_file_to_s3(s3_client: S3Client, source_ref: str, content: Union[bytes, list], page_num: int, job_id: str):
     """Write a temporary file to a created S3 location and return the file key."""
     bucket, temp_folder_key = get_temp_folder_bucket_key_from_s3_uri(source_ref, job_id)
     print(f'uploading data to bucket = {bucket}, path = {temp_folder_key}')
@@ -85,8 +78,9 @@ def output_pdf_temp_file_to_s3(s3, source_ref: str, content: Union[str, list], p
     else:
         file_key = f'{temp_folder_key}/{pdf_key_file_name}_{page_num}_blocks.json'
         content = json.dumps(content, default=JSONHandler)
-    s3.put_object(Body=content, Bucket=bucket, Key=file_key)
-    return f's3://{bucket}/{file_key}'
+    s3_write_path = f's3://{bucket}/{file_key}'
+    s3_client.write_content(s3_path=s3_write_path, content=content)
+    return s3_write_path
 
 
 def get_temp_folder_bucket_key_from_s3_uri(s3_ref: str, job_id: str):
@@ -96,173 +90,137 @@ def get_temp_folder_bucket_key_from_s3_uri(s3_ref: str, job_id: str):
     return bucket, folder_key
 
 
-def get_geometry_from_plumber_word(word, page_width, page_height):
+def get_geometry_from_plumber_word(word: dict, page_width: float, page_height: float):
     """Return a Geometry object from a PDFPlumber parsed word."""
     return Geometry(
-        float(abs(word['x0'] - word['x1']) / page_width),
-        float(abs(word['top'] - word['bottom']) / page_height),
-        float(word['x0'] / page_width),
-        float(word['top'] / page_height)
+        float(abs(word['x0'] - word['x1'])) / page_width,
+        float(abs(word['top'] - word['bottom'])) / page_height,
+        float(word['x0']) / page_width,
+        float(word['top']) / page_height
     )
 
 
-def plumber_line_to_blocks(page, plumber_line, blockIndex, page_width, page_height):
+def plumber_line_to_blocks(page: int, plumber_line: List[dict], block_index: int, page_width: float, page_height: float):
     """Return a list of line and word blocks for a PDFPlumber parsed line."""
-    blockIndex += 1
-    blockLine = Block(page, 'LINE', ' '.join([plumber_word['text'] for plumber_word in plumber_line]), blockIndex)
+    block_index += 1
+    block_line = Block(page, 'LINE', ' '.join([plumber_word['text'] for plumber_word in plumber_line]), block_index)
 
-    blockWordList = []
+    block_word_list = []
     ids = []
     for plumber_word in plumber_line:
-        blockIndex += 1
-        blockWord = Block(page, 'WORD', plumber_word['text'], blockIndex,
-                          get_geometry_from_plumber_word(plumber_word, page_width, page_height), blockLine.blockIndex)
-        blockLine.extend_geometry(blockWord.Geometry)
+        block_index += 1
+        block_word = Block(page, 'WORD', plumber_word['text'], block_index,
+                           get_geometry_from_plumber_word(plumber_word, page_width, page_height), block_line.blockIndex)
+        block_line.extend_geometry(block_word.Geometry)
 
-        blockWordList.append(blockWord)
+        block_word_list.append(block_word)
 
-        ids.append(blockWord.Id)
+        ids.append(block_word.Id)
 
-    blockLine.Relationships.append(Relationship(ids, 'CHILD'))
-    ret_blocks = [blockLine]
-    ret_blocks.extend(blockWordList)
-    return ret_blocks, blockIndex
+    block_line.Relationships.append(Relationship(ids, 'CHILD'))
+    ret_blocks = [block_line]
+    ret_blocks.extend(block_word_list)
+    return ret_blocks, block_index
 
 
-def blocks_from_native_pdf(page, page_num, page_width, page_height):
+def blocks_from_native_pdf(pdfplumber_page, page_num: int, page_width: float, page_height: float):
     """Return a list of blocks from a native PDF."""
     blocks = []
 
-    text = page.extract_text()
-    lines = [strippedLine for strippedLine in [lineWithSpace.strip() for lineWithSpace in (text if text else '').split('\n')] if strippedLine]
+    text = pdfplumber_page.extract_text()
+    lines = [stripped_line for stripped_line in [line_with_space.strip() for line_with_space in (text if text else '').split('\n')] if stripped_line]
     if lines:
-        lineIndex = 0
-        lineWords = lines[lineIndex].split()
-        wordIndex = 0
+        line_index = 0
+        line_words = lines[line_index].split()
+        word_index = 0
 
-        plumberText = []
-        plumberLine = []
+        plumber_text = []
+        plumber_line = []
 
-        words = page.extract_words()
+        words = pdfplumber_page.extract_words()
         token_sub_search_index = 0
         word_sub_search_index = 0
         token_block_list_idx = 0
         while token_block_list_idx < len(words):
             token_block = words[token_block_list_idx]
-            block_word_index_in_line_word = lineWords[wordIndex][word_sub_search_index:].find(token_block['text'][token_sub_search_index:])
+            block_word_index_in_line_word = line_words[word_index][word_sub_search_index:].find(token_block['text'][token_sub_search_index:])
             if block_word_index_in_line_word > -1:
                 # block word is a sub-part of text word ex. text: "word__in__line", block: "word"
-                if lineWords[wordIndex][word_sub_search_index:] == token_block['text'][:token_sub_search_index]:
-                    word_sub_search_index = len(lineWords[wordIndex])
+                if line_words[word_index][word_sub_search_index:] == token_block['text'][:token_sub_search_index]:
+                    word_sub_search_index = len(line_words[word_index])
                 else:
                     word_sub_search_index = word_sub_search_index + block_word_index_in_line_word + len(token_block['text'][token_sub_search_index:])
-                plumberLine.append(token_block)
-                if word_sub_search_index == len(lineWords[wordIndex]):
-                    if wordIndex < len(lineWords) - 1:
-                        wordIndex += 1
+                plumber_line.append(token_block)
+                if word_sub_search_index == len(line_words[word_index]):
+                    if word_index < len(line_words) - 1:
+                        word_index += 1
                     else:
-                        if lineIndex < len(lines) - 1:
-                            lineIndex += 1
-                            lineWords = lines[lineIndex].split()
-                            wordIndex = 0
-                            plumberText.append(plumberLine)
-                            plumberLine = []
+                        if line_index < len(lines) - 1:
+                            line_index += 1
+                            line_words = lines[line_index].split()
+                            word_index = 0
+                            plumber_text.append(plumber_line)
+                            plumber_line = []
                     word_sub_search_index = 0
 
                 token_block_list_idx += 1
                 token_sub_search_index = 0
             else:
                 # text word is a sub-part of block word ex. text: "word", block: "word__in___line"
-                token_sub_search_index += len(lineWords[wordIndex])
-                if wordIndex < len(lineWords) - 1:
-                    wordIndex += 1
+                token_sub_search_index += len(line_words[word_index])
+                if word_index < len(line_words) - 1:
+                    word_index += 1
                 else:
-                    if lineIndex < len(lines) - 1:
-                        lineIndex += 1
-                        lineWords = lines[lineIndex].split()
-                        wordIndex = 0
-                        if plumberLine:
-                            plumberText.append(plumberLine)
-                            plumberLine = []
+                    if line_index < len(lines) - 1:
+                        line_index += 1
+                        line_words = lines[line_index].split()
+                        word_index = 0
+                        if plumber_line:
+                            plumber_text.append(plumber_line)
+                            plumber_line = []
 
-        if plumberLine:
-            plumberText.append(plumberLine)
+        if plumber_line:
+            plumber_text.append(plumber_line)
 
-        blockIndex = -1
-        if plumberText:
-            for plumberLine in plumberText:
-                lineAndWordBlocks, blockIndex = plumber_line_to_blocks(page_num, plumberLine, blockIndex, page_width, page_height)
+        block_index = -1
+        if plumber_text:
+            for plumber_line in plumber_text:
+                lineAndWordBlocks, block_index = plumber_line_to_blocks(page_num, plumber_line, block_index, page_width, page_height)
                 blocks.extend(lineAndWordBlocks)
     return blocks
 
 
-def analyze_document(byte_array):
-    """Call Textract's detect_document_text method and return the payload."""
-    textract_client = boto3.client('textract')
-
-    response = textract_client.detect_document_text(
-        Document={
-            'Bytes': byte_array
-        }
-    )
-
-    return response
-
-
-def textract_block_to_block_relationship(tr):
+def textract_block_to_block_relationship(textract_relationship_list: List[dict]):
     """Return a block relationship object from a Textract block object."""
     ids = []
-    if tr:
-        for r in tr:
-            if r['Type'] != 'CHILD':
+    if textract_relationship_list:
+        for relationship in textract_relationship_list:
+            if relationship['Type'] != 'CHILD':
                 continue
-            ids.extend(r['Ids'])
+            ids.extend(relationship['Ids'])
             break
     return Relationship(ids, 'CHILD')
 
 
-def textract_block_to_block(page, tb, index, parent_index=-1):
+def textract_block_to_block(page: int, textract_block: dict, index: int, parent_index: int = -1):
     """Return a block object from a Textract block object."""
-    textract_block_bounding_box = tb['Geometry']['BoundingBox']
-    block = Block(page, tb['BlockType'], tb['Text'], index,
+    textract_block_bounding_box = textract_block['Geometry']['BoundingBox']
+    block = Block(page, textract_block['BlockType'], textract_block['Text'], index,
                   Geometry(textract_block_bounding_box['Width'], textract_block_bounding_box['Height'],
                   textract_block_bounding_box['Left'], textract_block_bounding_box['Top']))
-    block.Id = tb['Id']
-    block.Relationships = [] if 'Relationships' not in tb else [textract_block_to_block_relationship(tb['Relationships'])]
+    block.Id = textract_block['Id']
+    block.Relationships = [] if 'Relationships' not in textract_block else [textract_block_to_block_relationship(textract_block['Relationships'])]
     block.parentBlockIndex = parent_index
     return block
 
 
-def convert_to_png_bytes(pdf_bytes, page_number, dims):
-    """Convert PDF bytes to PNG bytes."""
-    pdf_ppm_image_files = convert_from_bytes(pdf_bytes, poppler_path=POPPLER_PATH, size=dims)
-    pdf_page_ppm_image_file = pdf_ppm_image_files[page_number - 1]
-    bytes_io_obj = BytesIO()
-    pdf_page_ppm_image_file.save(bytes_io_obj, format='PNG')
-    return bytes_io_obj.getvalue()
-
-
-def resize_and_convert_to_bytes(pdf_bytes: bytes, page_number: int, dims=None):
-    """Return PNG bytes of a PDF, resizing if necessary to account for Textract API max limit."""
-    print(f"len of pdf_byte_value = {len(pdf_bytes)}")
-    png_byte_value = convert_to_png_bytes(pdf_bytes, page_number, dims=dims)
-    print(f"len of initial png_byte_value pre-resize = {len(png_byte_value)}")
-    filesize = len(png_byte_value)
-    if filesize > TEXTRACT_BYTE_LIMIT and dims:
-        ratio_change = TEXTRACT_BYTE_LIMIT / filesize
-        new_width = dims[0] * ratio_change
-        new_height = dims[1] * ratio_change
-        png_byte_value = convert_to_png_bytes(pdf_bytes, page_number, (new_width, new_height))
-    return png_byte_value
-
-
-def blocks_from_scanned_pdf(pdf_bytes, page_number, dims=None):
+def blocks_from_scanned_pdf(pdf_bytes: bytes, page_number: int, poppler_path: str, textract_client: TextractClient):
     """Return a list of blocks from a scanned PDF."""
-    png_byte_value = resize_and_convert_to_bytes(pdf_bytes, page_number, dims=dims)
-    print(f"len of png_byte_value = {len(png_byte_value)}")
+    page_png_byte_value = convert_pdf_to_png_bytes(pdf_bytes=pdf_bytes, poppler_path=poppler_path, page_number=page_number)
+    print(f"len of page_png_byte_value = {len(page_png_byte_value)}")
     try:
-        result = analyze_document(png_byte_value)
-        textract_blocks = result['Blocks']
+        result = textract_client.detect_document_text(page_png_byte_value)
+        textract_blocks = result["Blocks"]
         textract_line_blocks = [block for block in textract_blocks if block['BlockType'] == 'LINE']
         textract_word_blocks = [block for block in textract_blocks if block['BlockType'] == 'WORD']
         print("== Textract blocks ==")
@@ -299,7 +257,7 @@ def blocks_from_scanned_pdf(pdf_bytes, page_number, dims=None):
         print(f"number of after conversion word blocks = {len(word_blocks)}")
         return blocks
     except Exception as e:
-        print(f"Failed to analyze {page_number} due to {e}")
+        print(f"Failed to analyze page {page_number} due to {e}")
     return []
 
 
@@ -367,31 +325,31 @@ def lambda_handler(event, context):
     print(f'labeling job id = {job_id}')
     data_obj = event["dataObject"]
 
-    print(f"POPPLER_PATH={POPPLER_PATH} file permission info")
-    print(f"READ Permission: {os.access(POPPLER_PATH, os.R_OK)}")
-    print(f"WRITE Permission: {os.access(POPPLER_PATH, os.W_OK)}")
-    print(f"EXEC Permission: {os.access(POPPLER_PATH, os.X_OK)}")
+    print(f"POPPLER_PATH: {general.POPPLER_PATH} file permission info")
+    print(f"READ Permission: {os.access(general.POPPLER_PATH, os.R_OK)}")
+    print(f"WRITE Permission: {os.access(general.POPPLER_PATH, os.W_OK)}")
+    print(f"EXEC Permission: {os.access(general.POPPLER_PATH, os.X_OK)}")
 
-    metadata = data_obj['metadata']
+    metadata = data_obj.get("metadata")
 
-    page_num = int(data_obj["page"]) if "page" in data_obj else 1
-    metadata['page'] = str(page_num)
+    metadata["page"] = data_obj.get("page", "1")
+    page_num = int(metadata["page"])
 
     # Get source-ref if specified
-    source_ref = data_obj["source-ref"] if "source-ref" in data_obj else None
+    source_ref = data_obj.get("source-ref")
     metadata["source_ref"] = source_ref
 
     # document_id will consist of '{filename}_{page #}'
     doc_filename = os.path.splitext(os.path.basename(source_ref))[0]
     metadata["document_id"] = f"{doc_filename}_{metadata['page']}" if source_ref else None
 
-    use_textract_only = metadata["use-textract-only"] if "use-textract-only" in metadata else False
+    use_textract_only = metadata.get("use-textract-only", False)
     metadata["use-textract-only"] = "true" if use_textract_only else "false"
 
-    # create low-level S3 client
-    s3 = boto3.client('s3')
+    s3_client = S3Client()
+    textract_client = TextractClient()
 
-    pdf_s3_resp = get_s3_object(s3, source_ref)
+    pdf_s3_resp = s3_client.get_object_response_from_s3(source_ref)
     pdf_bytes = pdf_s3_resp['Body'].read()
     print(f"pdf_bytes length = {len(pdf_bytes)}")
     pdf_page_base64 = base64.b64encode(pdf_bytes)
@@ -401,12 +359,12 @@ def lambda_handler(event, context):
     primary_annotation_ref = data_obj.get("primary-annotation-ref")
     if primary_annotation_ref:
         do_ocr = False
-        primary_annotation_s3_resp = get_s3_object(s3, primary_annotation_ref)
+        primary_annotation_s3_resp = s3_client.get_object_response_from_s3(primary_annotation_ref)
 
         # use pdf blocks from most recently modified annotation file
         secondary_annotation_ref = data_obj.get("secondary-annotation-ref")
         if secondary_annotation_ref:
-            secondary_annotation_s3_resp = get_s3_object(s3, secondary_annotation_ref)
+            secondary_annotation_s3_resp = s3_client.get_object_response_from_s3(secondary_annotation_ref)
 
             primary_annotation_date = primary_annotation_s3_resp["LastModified"]
             secondary_annotation_date = secondary_annotation_s3_resp["LastModified"]
@@ -417,15 +375,17 @@ def lambda_handler(event, context):
                 annotation_bytes = secondary_annotation_s3_resp["Body"].read()
 
                 # set most recent annotation file as primary annotation reference
-                data_obj['primary-annotation-ref'], data_obj['secondary-annotation-ref'] = data_obj['secondary-annotation-ref'], data_obj['primary-annotation-ref']
+                data_obj["primary-annotation-ref"], data_obj["secondary-annotation-ref"] = \
+                    data_obj["secondary-annotation-ref"], data_obj["primary-annotation-ref"]
         else:
             annotation_bytes = primary_annotation_s3_resp["Body"].read()
 
-        annotation_obj = json.loads(annotation_bytes.decode('utf-8'))
+        annotation_dict = json.loads(annotation_bytes.decode('utf-8'))
+        annotation_obj = SemiStructuredAnnotation(**annotation_dict)
 
-        if "Blocks" in annotation_obj:
-            pdf_blocks = annotation_obj["Blocks"]
-            is_native_pdf = annotation_obj.get("DocumentType", PDFType.NativePDF.name) == PDFType.NativePDF.name
+        if annotation_obj.Blocks:
+            pdf_blocks = annotation_obj.Blocks
+            is_native_pdf = annotation_obj.DocumentType == SemiStructuredDocumentType.NativePDF.value
         else:
             print('Remove annotation references as no extracted blocks are found in the latest annotation file.')
             data_obj.pop("primary-annotation-ref", None)
@@ -434,30 +394,28 @@ def lambda_handler(event, context):
 
     if do_ocr:
         print(f'Attempting OCR with use-textract-only: {use_textract_only}')
-        pdf_blocks, is_native_pdf = get_pdf_blocks(pdf_bytes, page_num, use_textract_only)
+        pdf_blocks, is_native_pdf = get_pdf_blocks(pdf_bytes, page_num, use_textract_only, source_ref=source_ref, textract_client=textract_client)
 
     # create intermediate files and write to S3
-    pdf_base64_s3_ref = output_pdf_temp_file_to_s3(s3, source_ref, pdf_page_base64, page_num, job_id)
-    pdf_block_s3_ref = output_pdf_temp_file_to_s3(s3, source_ref, pdf_blocks, page_num, job_id)
+    pdf_base64_s3_ref = output_pdf_temp_file_to_s3(s3_client, source_ref, pdf_page_base64, page_num, job_id)
+    pdf_block_s3_ref = output_pdf_temp_file_to_s3(s3_client, source_ref, pdf_blocks, page_num, job_id)
 
     task_object = {
         "pdfBase64S3Ref": pdf_base64_s3_ref,
         "pdfBlocksS3Ref": pdf_block_s3_ref,
-        "pdfType": PDFType.NativePDF.name if is_native_pdf else PDFType.ScannedPDF.name,
-        "version": VERSION,
+        "pdfType": SemiStructuredDocumentType.NativePDF.value if is_native_pdf else SemiStructuredDocumentType.ScannedPDF.value,
+        "version": general.VERSION,
         "metadata": metadata,
-        "annotatorMetadata": data_obj["annotator-metadata"] if "annotator-metadata" in data_obj else None,
+        "annotatorMetadata": data_obj.get("annotator-metadata"),
         "primaryAnnotationS3Ref": data_obj.get("primary-annotation-ref"),
         "secondaryAnnotationS3Ref": data_obj.get("secondary-annotation-ref")
     }
-
-    print(task_object)
 
     # Build response object
     output = {
         "taskInput": {
             "taskObject": task_object,
-            "labels": metadata["labels"]
+            "labels": metadata.get("labels")
         },
         "humanAnnotationRequired": "true"
     }
@@ -466,5 +424,7 @@ def lambda_handler(event, context):
     if source_ref is None:
         print(" Failed to pre-process {} !".format(event["labelingJobArn"]))
         output["humanAnnotationRequired"] = "false"
+
+    print(output)
 
     return output

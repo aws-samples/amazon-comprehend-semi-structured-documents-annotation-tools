@@ -165,7 +165,7 @@ Resources:
   GTPreHumanTaskLambdaFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: pre_human_task_lambda.lambda_handler
+      Handler: lambdas.pre_human_task_lambda.lambda_handler
       MemorySize: !Ref PreHumanLambdaMemoryInMB
       Role:
         Fn::GetAtt: [GTPreHumanTaskLambdaExecutionRole, Arn]
@@ -178,7 +178,7 @@ Resources:
   GTAnnotationConsolidationLambdaFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: annotation_consolidation_lambda.lambda_handler
+      Handler: lambdas.annotation_consolidation_lambda.lambda_handler
       MemorySize: !Ref ConsolidationLambdaMemoryInMB
       Role: !GetAtt GTAnnotationConsolidationLambdaExecutionRole.Arn
       CodeUri: src

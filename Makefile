@@ -6,6 +6,7 @@ PY_VERSION := 3.8
 export PYTHONUNBUFFERED := 1
 
 SRC_DIR := src
+BIN_DIR := bin
 SAM_DIR := .aws-sam
 
 SRC_TEMPLATE_NAME := comprehend-semi-structured-documents-annotation-template
@@ -44,33 +45,32 @@ bootstrap:
 	$(PYTHON) -m $(PIP) install aws-sam-cli
 	$(PYTHON) -m $(PIP) install pipenv
 	$(PYTHON) -m $(PIP) install awscli 
-	pipenv sync --dev # Install locked dependencies, including dev-dependencies
-	pipenv shell
+	$(PYTHON) -m pipenv sync -d # Install locked dependencies
 
 # Activate
 activate:
-	pipenv shell # activate the virtualenv
+	$(PYTHON) -m pipenv shell # activate the virtualenv
 
 # Update the dependency
 update:
-	pipenv install # Install dependencies and update the pipfile.lock file
-	pipenv sync --dev #  Install locked dependencies from pipfile.lock
-	pipenv lock --requirements > $(SRC_DIR)/requirements.txt
+	$(PYTHON) -m pipenv install # Install dependencies and update the pipfile.lock file
+	$(PYTHON) -m pipenv sync --dev #  Install locked dependencies from pipfile.lock
+	$(PYTHON) -m pipenv lock --requirements > $(SRC_DIR)/requirements.txt
 
 # Run basic python checkstyle and cnf-lint, and build the CFN template using sam cli
 build:
-	pipenv lock --requirements > $(SRC_DIR)/requirements.txt
-	pipenv run flake8 $(SRC_DIR)
-	pipenv run pydocstyle $(SRC_DIR)
-	pipenv run cfn-lint $(SRC_TEMPLATE_NAME).yml
+	$(PYTHON) -m pipenv lock --requirements > $(SRC_DIR)/requirements.txt
+	$(PYTHON) -m pipenv run flake8 $(SRC_DIR) $(BIN_DIR)
+	$(PYTHON) -m pipenv run pydocstyle $(SRC_DIR) $(BIN_DIR)
+	$(PYTHON) -m pipenv run cfn-lint $(SRC_TEMPLATE_NAME).yml
 	sam build --profile $(AWS_PROFILE) --template $(SRC_TEMPLATE_NAME).yml
 
 unit-testing: build
-	pipenv run py.test --cov=$(SRC_DIR) --cov-fail-under=97 -vv test/unit -s --cov-report html
+	$(PYTHON) -m pipenv run py.test --cov=$(SRC_DIR) --cov=$(BIN_DIR) --cov-fail-under=80 -vv test/unit -s --cov-report html
 
 # can be triggered as `make integ-testing LAMBDA_NAME=access-control`
 integ-testing: unit-testing
-	pipenv run py.test  -s -vv test/integ/test_$(LAMBDA_NAME).py
+	$(PYTHON) -m pipenv run py.test  -s -vv test/integ/test_$(LAMBDA_NAME).py
 
 # Deploy the sam packaged CFN template with --guided option
 deploy-guided:
@@ -79,3 +79,10 @@ deploy-guided:
 # Deploy the sam packaged CFN template without --guided option, use default samconfig.toml if present
 deploy:
 	sam deploy --profile $(AWS_PROFILE) --region $(AWS_REGION) --parameter-overrides "ParameterKey=PreHumanLambdaTimeoutInSeconds,ParameterValue=$(PRE_HUMAN_LAMBDA_TIMEOUT_IN_SECONDS) ParameterKey=ConsolidationLambdaTimeoutInSeconds,ParameterValue=$(CONSOLIDATION_LAMBDA_TIMEOUT_IN_SECONDS)" --capabilities CAPABILITY_IAM
+
+# chain bootstrap, build, and deploy-guided commands
+ready-and-deploy-guided:
+	make bootstrap
+	make build
+	make deploy-guided || true # skip errors with 'true' in case stack already exists
+	make activate

@@ -1,69 +1,50 @@
 #!/usr/bin/env python
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
+"""Script used to create a Sagemaker GroundTruth labeling job for semi-structured documents."""
 
-import pdfplumber
 import argparse
 import json
 import os
-import io
-import logging
-import boto3
-import datetime
-from typing import List, Dict
-from urllib.parse import urlparse
-import uuid
-import mimetypes
 import shutil
+import logging
+import datetime
+from typing import List
+import uuid
+
+import pdfplumber
+import boto3
+
+from utils.s3_helper import S3Client
+from utils.output_manifest_utils import is_an_expired_task
+from constants import general
+from type.groundtruth_annotation_ui_config import GroundTruthAnnotationUIConfig, AnnotationUITaskSchemas, NamedEntitiesAnnotationTaskConfig
+from type.semi_structured_input_manifest import SemiStructuredInputManifestObject
+from type.semi_structured_output_manifest import SemiStructuredOutputManifestObject, SemiStructuredOutputManifestJobObject
 
 
 logging.basicConfig(level=logging.WARN)
 logger = logging.getLogger(__name__)
-"""
-Script running on cloud dev desktop to pre-upload annotation data to dynamodb and s3 for testing purpose.
-"""
-
-DEFAULT_LABELS = ["PER", "LOC", "ORG", "FAC", "BRAND", "COMM", "TITLE:MOVIE", "TITLE:MUSIC", "TITLE:BOOK", "TITLE:SOFT",
-              "TITLE:GAME", "TITLE:OTHER", "PERSON:TITLE", "QUANT", "IDENTITY", "OTHER"]
-
-def parse_s3_url(s3_input_path: str):
-    """ Parse s3 url to get bucket name and key """
-    parsed_s3_url = urlparse(s3_input_path)
-    bucket_name = parsed_s3_url.netloc
-    key = parsed_s3_url.path.strip('/')
-    return bucket_name, key
 
 
-def write_jsonl(path: str, rows: List[Dict], s3_client=None):
-    """
-    Writes the passed in list of dictionaries to the given local or s3 path as JSONL
+class InvalidAnnotatorMetadataException(Exception):
+    """Raise when invalid annotator metadata is given."""
 
-    :param path: Path to write to. Accepts local filesystem and S3 paths
-    :param rows: List of dictionaries to encode as JSONL
-    :param boto3_session: boto3 session.  required for writing to S3 paths
-    :return:
-    """
-    content = ''.join([f'{json.dumps(row)}\n' for row in rows])
-    upload_object(content, path, s3_client)
+    def __init__(self, message="Incorrect annotator metadata argument. Cannot parse a valid key/value pair."):
+        """Initialize the custom exception."""
+        super().__init__(message)
 
 
-def upload_object(content, path, s3_client):
-    content_bytes = content if type(content) == bytes else content.encode('utf-8')
-    bucket, key = parse_s3_url(path)
-    s3_client.upload_fileobj(io.BytesIO(content_bytes), bucket, key)
+class NoFilesInDirectoryException(Exception):
+    """Raise when local directory with files is empty."""
+
+    def __init__(self, message="No semi-structured files have been found in input directory. Please re-enter a S3 path containing semi-structured files."):
+        """Initialize the custom exception."""
+        super().__init__(message)
 
 
-def upload_directory(path, bucket_name, s3_path_prefix, s3_client):
-    for root, dirs, files in os.walk(path):
-        for file in files:
-            extra_args = {}
-            content_type = mimetypes.guess_type(file)[0]
-            if content_type:
-                extra_args['ContentType'] = content_type
-            s3_client.upload_file(os.path.join(root, file), bucket_name, f'{s3_path_prefix}/{root}/{file}', ExtraArgs=extra_args)
-
-
-def cleanup(temp_path):
+def cleanup(temp_path: str):
+    """Recursively delete all files and folders in path."""
     if os.path.exists(temp_path):
         shutil.rmtree(temp_path)
 
@@ -73,178 +54,210 @@ def validate_and_format_annotator_metadata(annotator_metadata_str: str):
     annotator_metadata = dict()
     annotator_metadata_parts = annotator_metadata_str.split(',')
     if len(annotator_metadata_parts) >= 2:
-        key_value_array = [annotator_metadata_parts[i:i+2] for i in range(0, len(annotator_metadata_parts), 2)]
-        for key_str, val_str in key_value_array:
-            if not (key_str.lower().startswith('key=') and val_str.lower().startswith('value=')):
-                raise ValueError('Incorrect annotator metadata argument')
-            annotator_metadata[key_str.split('=')[1]] = val_str.split('=')[1]
+        key_value_array = [annotator_metadata_parts[i:i + 2] for i in range(0, len(annotator_metadata_parts), 2)]
+        try:
+            for key_str, val_str in key_value_array:
+                if not (key_str.lower().startswith('key=') and val_str.lower().startswith('value=')):
+                    raise InvalidAnnotatorMetadataException()
+                annotator_metadata[key_str.split('=')[1]] = val_str.split('=')[1]
+        except ValueError:
+            raise InvalidAnnotatorMetadataException()
         return annotator_metadata
-    return ValueError('Incorrect annotator metadata argument')
+    raise InvalidAnnotatorMetadataException()
 
 
-def get_s3_file_contents(s3_client, s3_ref):
-    """Return contents from an S3 file decoded with utf-8"""
-    bucket, key = parse_s3_url(s3_ref)
-    response = s3_client.get_object(Bucket=bucket, Key=key)
-    payload = response['Body'].read().decode('utf-8')
-    return payload
-
-
-def describe_sagemaker_labeling_job(sagemaker_client, job_name):
+def describe_sagemaker_labeling_job(sagemaker_client, job_name: str):
     """Call Sagemaker's describe-labeling-job API on a job."""
     labeling_job_response = sagemaker_client.describe_labeling_job(LabelingJobName=job_name)
     return labeling_job_response
 
 
-def get_ui_template_root_from_sagemaker_job(sagemaker_client, job_name):
+def get_ui_template_root_from_sagemaker_job(sagemaker_client, job_name: str):
     """Return the UI template root in S3 of a sagemaker job."""
     labeling_job_response = describe_sagemaker_labeling_job(sagemaker_client, job_name)
     input_manifest_ref = labeling_job_response['InputConfig']['DataSource']['S3DataSource']['ManifestS3Uri']
     return os.path.splitext(os.path.basename(input_manifest_ref))[0]
 
 
-def get_output_manifest_ref_from_sagemaker_job(sagemaker_client, job_name):
+def get_output_manifest_ref_from_sagemaker_job(sagemaker_client, job_name: str):
     """Return the S3 reference of a sagemaker job's output manifest."""
     labeling_job_response = describe_sagemaker_labeling_job(sagemaker_client, job_name)
     output_manifest_ref = labeling_job_response['LabelingJobOutput']['OutputDatasetS3Uri']
     return output_manifest_ref
 
 
-def generate_manifests_from_previous_jobs(s3_client, sagemaker_client, primary_output_manifest_contents,
-                                          labels, annotator_metadata, args):
-    """"""
+def generate_manifest_jsons_from_previous_jobs(s3_client: S3Client, sagemaker_client, primary_output_manifest_contents: str,
+                                               labels: List, annotator_metadata: dict, args):
+    """Generate manifest json lines given previous jobs."""
     manifest_json_list = []
     if args.blind2_labeling_job_name:
         secondary_output_manifest_s3_ref = get_output_manifest_ref_from_sagemaker_job(sagemaker_client, args.blind2_labeling_job_name)
-        secondary_output_manifest_contents = get_s3_file_contents(s3_client, secondary_output_manifest_s3_ref)
+        secondary_output_manifest_contents = s3_client.get_object_content_from_s3(secondary_output_manifest_s3_ref)
         secondary_output_manifest_lines = secondary_output_manifest_contents.splitlines()
 
     for idx, manifest_line in enumerate(primary_output_manifest_contents.splitlines()):
-        primary_output_manifest_obj = json.loads(manifest_line)
-        primary_output_manifest_obj['metadata']['labels'] = labels
-        primary_annotation_ref = None if (args.blind1_labeling_job_name not in primary_output_manifest_obj or \
-                                 'annotation-ref' not in primary_output_manifest_obj[args.blind1_labeling_job_name]) else \
-                                 primary_output_manifest_obj[args.blind1_labeling_job_name]['annotation-ref']
+        primary_output_manifest_json_obj = json.loads(manifest_line)
+        primary_output_manifest_obj = SemiStructuredOutputManifestObject(json_obj=primary_output_manifest_json_obj, job_name=args.blind1_labeling_job_name)
 
-        secondary_output_manifest_obj = json.loads(secondary_output_manifest_lines[idx]) if args.blind2_labeling_job_name else {}
-        secondary_annotation_ref = None if (args.blind2_labeling_job_name not in secondary_output_manifest_obj or \
-                                   'annotation-ref' not in secondary_output_manifest_obj[args.blind2_labeling_job_name]) else \
-                                   secondary_output_manifest_obj[args.blind2_labeling_job_name]['annotation-ref']
+        if args.only_include_expired_tasks:
+            if not is_an_expired_task(primary_output_manifest_obj, args.blind1_labeling_job_name):
+                continue
 
-        manifest_json = {
-            'source-ref': primary_output_manifest_obj['source-ref'],
-            'page': primary_output_manifest_obj['page'],
-            'metadata': primary_output_manifest_obj['metadata'],
-            'annotator-metadata': annotator_metadata,
-            'primary-annotation-ref': primary_annotation_ref,
-            'secondary-annotation-ref': secondary_annotation_ref
-        }
-        manifest_json_list.append(manifest_json)
+            primary_annotation_ref = getattr(primary_output_manifest_obj, "primary-annotation-ref")
+            secondary_annotation_ref = getattr(primary_output_manifest_obj, "secondary-annotation-ref")
+        else:
+            primary_output_manifest_job_object = getattr(primary_output_manifest_obj, str(args.blind1_labeling_job_name), SemiStructuredOutputManifestJobObject({}))
+            primary_annotation_ref = getattr(primary_output_manifest_job_object, "annotation-ref")
+
+            secondary_output_manifest_json_obj = json.loads(secondary_output_manifest_lines[idx]) if args.blind2_labeling_job_name else {}
+            secondary_output_manifest_obj = SemiStructuredOutputManifestObject(json_obj=secondary_output_manifest_json_obj, job_name=args.blind2_labeling_job_name)
+            secondary_output_manifest_job_object = getattr(secondary_output_manifest_obj, str(args.blind2_labeling_job_name), SemiStructuredOutputManifestJobObject({}))
+            secondary_annotation_ref = getattr(secondary_output_manifest_job_object, "annotation-ref")
+
+        manifest_json = SemiStructuredInputManifestObject(
+            source_ref=getattr(primary_output_manifest_obj, "source-ref"),
+            page=primary_output_manifest_obj.page,
+            metadata={
+                **getattr(primary_output_manifest_obj, "metadata").to_dict(),
+                "labels": labels
+            },
+            annotator_metadata=annotator_metadata,
+            primary_annotation_ref=primary_annotation_ref,
+            secondary_annotation_ref=secondary_annotation_ref
+        )
+        manifest_json_list.append(manifest_json.__dict__)
     return manifest_json_list
 
 
-def validate_and_download_from_input_s3_path(s3_resource, ssie_documents_s3_bucket, args):
+def validate_and_download_from_input_s3_path(s3_client: S3Client, ssie_documents_s3_bucket: str, args):
     """Validate the inputted S3 path and download the files locally. Returns the S3 and local paths."""
     input_s3_path = args.input_s3_path.rstrip('/')
     if not input_s3_path:
-        raise ValueError('An input S3 path is required for NON-arbitration/iteration jobs, but none was given.')
-    input_bucket, input_key = parse_s3_url(input_s3_path)
+        raise ValueError('An input S3 path is required for NON-verification jobs, but none was given.')
+    input_bucket, input_key = S3Client.bucket_key_from_s3_uri(input_s3_path)
 
     if ssie_documents_s3_bucket != input_bucket and not args.create_input_manifest_only:
-        print(f'Please specify a s3 input path under {ssie_documents_s3_bucket} to start a labeling job. '
-            f'Current input bucket is {input_bucket} ')
-        return None
+        raise ValueError(f'Please specify a s3 input path under {ssie_documents_s3_bucket} to start a labeling job. '
+                         f'Current input bucket is {input_bucket}.')
 
-    local_dir = '/tmp/{}'.format(uuid.uuid4())
-    bucket = s3_resource.Bucket(input_bucket)
+    local_dir = f"/tmp/{uuid.uuid4()}"
 
-    for obj in bucket.objects.filter(Prefix=f'{input_key}/'):
-        if obj.key.endswith('.pdf'):
-            target = obj.key if local_dir is None \
-                else os.path.join(local_dir, os.path.basename(obj.key))
-            if not os.path.exists(os.path.dirname(target)):
-                os.makedirs(os.path.dirname(target))
-            bucket.download_file(obj.key, target)
+    s3_client.download_directory(local_dir_path=local_dir, bucket_name=input_bucket, s3_path_prefix=f'{input_key}/')
 
     if not os.path.isdir(local_dir):
-        print('No pdf files have been found in input directory. Please re-enter a S3 path contains PDF files.')
-        return None
+        raise NoFilesInDirectoryException()
+
     print(f'Downloaded files to temp local directory {local_dir}')
 
     return (input_s3_path, local_dir)
 
 
-def get_labels_and_manifest(schema_content, args):
+def get_labels_from_schema_content(content: str) -> List[str]:
+    """Return schemas.named_entity.tags value from GroundTruthAnnotationUIConfig object."""
+    schema_obj = GroundTruthAnnotationUIConfig(**json.loads(content))
+    return schema_obj.schemas.named_entity.tags
+
+
+def get_labels_and_manifest(schema_content: str, args):
     """Get schema content and labels from cli argument or automated creation."""
     if args.schema_path:
-        labels = json.loads(schema_content)['schemas']['named_entity']['tags']
+        labels = get_labels_from_schema_content(schema_content)
     else:
-        labels = DEFAULT_LABELS if not args.entity_types else args.entity_types
-        schema_content = json.dumps({"version": "SSIE_NER_SCHEMA_2021-04-15",
-                        "schemas": {
-                            "named_entity": {
-                                "annotation_task": "NER",
-                                "tags": labels,
-                                "properties": []}},
-                        "exported_time": "2021-04-15T17:34:34.493Z",
-                        "uuid": "f44b0438-72ac-43ac-bdc7-5727914522b9"
-                        })
+        labels = general.DEFAULT_LABELS if not args.entity_types else args.entity_types
+        schema_content = json.dumps(GroundTruthAnnotationUIConfig(
+            version="SSIE_NER_SCHEMA_2021-04-15",
+            schemas=AnnotationUITaskSchemas(
+                named_entity=NamedEntitiesAnnotationTaskConfig(
+                    annotation_task="NER",
+                    tags=labels,
+                    properties=[]
+                )
+            ),
+            exported_time="2021-04-15T17:34:34.493Z",
+            uuid="f44b0438-72ac-43ac-bdc7-5727914522b9"
+        ).dict())
     return schema_content, labels
 
 
-def generate_manifests_and_schema(s3_client, s3_resource, sagemaker_client, ssie_documents_s3_bucket,
-                                annotator_metadata, use_textract_only, args):
+def generate_manifest_jsons_and_schema_for_verification_job(sagemaker_client, s3_client: S3Client, ssie_documents_s3_bucket: str, annotator_metadata: dict, args):
+    """Generate manifest jsons and schema for a verification job."""
+    primary_output_manifest_s3_ref = get_output_manifest_ref_from_sagemaker_job(sagemaker_client, args.blind1_labeling_job_name)
+    primary_output_manifest_contents = s3_client.get_object_content_from_s3(primary_output_manifest_s3_ref)
+
+    blind1_ui_template_root = get_ui_template_root_from_sagemaker_job(sagemaker_client, args.blind1_labeling_job_name)
+    ui_schema_path_copy = f's3://{ssie_documents_s3_bucket}/comprehend-semi-structured-docs-ui-template/{blind1_ui_template_root}/ui-template/schema.json'
+    print(f'Using UI schema path: {ui_schema_path_copy}')
+    schema_content = s3_client.get_object_content_from_s3(ui_schema_path_copy)
+
+    labels = get_labels_from_schema_content(schema_content)
+
+    manifest_json_list = generate_manifest_jsons_from_previous_jobs(s3_client, sagemaker_client, primary_output_manifest_contents, labels, annotator_metadata, args)
+    return manifest_json_list, schema_content
+
+
+def generate_manifest_jsons_and_schema_for_standard_job(s3_client: S3Client, ssie_documents_s3_bucket: str, use_textract_only: bool, annotator_metadata: dict, args):
+    """Generate manifest jsons and schema for a standard job."""
+    input_s3_path, local_dir = validate_and_download_from_input_s3_path(s3_client, ssie_documents_s3_bucket, args)
+
+    schema_content = s3_client.get_object_content_from_s3(args.schema_path) if args.schema_path else None
+    schema_content, labels = get_labels_and_manifest(schema_content, args)
+
+    # Generate input manifest file for each page of PDF.
+    manifest_json_list = []
+    for file_name in os.listdir(local_dir):
+        file_path = os.path.join(local_dir, file_name)
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for i in range(len(pdf.pages)):
+                    manifest_json_obj = SemiStructuredInputManifestObject(
+                        source_ref=f'{input_s3_path}/{file_name}',
+                        page=f'{i+1}',
+                        metadata={
+                            "pages": f'{len(pdf.pages)}',
+                            "use-textract-only": use_textract_only,
+                            "labels": labels
+                        },
+                        annotator_metadata=annotator_metadata
+                    )
+                    manifest_json_list.append(manifest_json_obj.__dict__)
+        except Exception:
+            print(f'Unreadable file: {file_path}. Skipping.')
+            continue
+
+    cleanup(local_dir)
+    print(f'Deleted downloaded temp files from {local_dir}')
+
+    return manifest_json_list, schema_content
+
+
+def generate_manifest_jsons_and_schema(s3_client: S3Client, sagemaker_client, ssie_documents_s3_bucket: str,
+                                       annotator_metadata: dict, use_textract_only: bool, args):
+    """Create manifests and schema for the annotation job."""
     if args.blind1_labeling_job_name:
-        primary_output_manifest_s3_ref = get_output_manifest_ref_from_sagemaker_job(sagemaker_client, args.blind1_labeling_job_name)
-        primary_output_manifest_contents = get_s3_file_contents(s3_client, primary_output_manifest_s3_ref)
-
-        blind1_ui_template_root = get_ui_template_root_from_sagemaker_job(sagemaker_client, args.blind1_labeling_job_name)
-        ui_schema_path_copy = f's3://{ssie_documents_s3_bucket}/comprehend-semi-structured-docs-ui-template/' \
-                                f'{blind1_ui_template_root}/ui-template/schema.json'
-        print(f'Using UI schema path: {ui_schema_path_copy}')
-        schema_content = get_s3_file_contents(s3_client, ui_schema_path_copy)
-
-        labels = json.loads(schema_content)['schemas']['named_entity']['tags']
-
-        manifest_json_list = generate_manifests_from_previous_jobs(s3_client, sagemaker_client, primary_output_manifest_contents,
-                                                                   labels, annotator_metadata, args)
+        manifest_json_list, schema_content = generate_manifest_jsons_and_schema_for_verification_job(sagemaker_client, s3_client, ssie_documents_s3_bucket, annotator_metadata, args)
     else:
-        paths = validate_and_download_from_input_s3_path(s3_resource, ssie_documents_s3_bucket, args)
-        if not paths:
-            return None
-        input_s3_path, local_dir = paths
-
-        schema_content = get_s3_file_contents(s3_client, args.schema_path) if args.schema_path else None
-        schema_content, labels = get_labels_and_manifest(schema_content, args)
-
-        # Generate input manifest file for each page of PDF.
-        manifest_json_list = []
-        for file_name in os.listdir(local_dir):
-            file_path = os.path.join(local_dir, file_name)
-            try:
-                with pdfplumber.open(file_path) as pdf:
-                    for i in range(len(pdf.pages)):
-                        manifest_json = {
-                            'source-ref': f'{input_s3_path}/{file_name}',
-                            'page': f'{i+1}',
-                            'metadata': {
-                                'pages': f'{len(pdf.pages)}',
-                                'use-textract-only': use_textract_only,
-                                'labels': labels
-                            },
-                            'annotator-metadata': annotator_metadata,
-                        }
-                        manifest_json_list.append(manifest_json)
-            except Exception:
-                print(f'Unreadable file: {file_path}. Skipping.')
-                continue
-
-        cleanup(local_dir)
-        print(f'Deleted downloaded temp files from {local_dir}')
+        manifest_json_list, schema_content = generate_manifest_jsons_and_schema_for_standard_job(s3_client, ssie_documents_s3_bucket, use_textract_only, annotator_metadata, args)
     return (manifest_json_list, schema_content) if manifest_json_list else None
 
 
+def validate_groundtruth_labeling_job_name(sagemaker_client, job_name_prefix: str, no_suffix: bool):
+    """Generate and validate GT labeling job name uniqueness."""
+    now = datetime.datetime.utcnow()
+    now_str = now.strftime('%Y%m%dT%H%M%S')
+    if no_suffix:
+        ground_truth_labeling_job_name = job_name_prefix
+        try:
+            describe_sagemaker_labeling_job(sagemaker_client, ground_truth_labeling_job_name)
+            return None
+        except Exception:
+            pass
+    else:
+        ground_truth_labeling_job_name = f'{job_name_prefix}-labeling-job-{now_str}'
+    return ground_truth_labeling_job_name
+
+
 def main():
+    """To be run when script called."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--input-s3-path', type=str, help='S3 path that contains PDFs to annotate.')
     parser.add_argument('--cfn-name', type=str, required=True, help='CloudFormation stack deployed by comprehend-semi-structured-documents-annotation-template.')
@@ -255,12 +268,17 @@ def main():
     parser.add_argument('--create-input-manifest-only', action='store_true', help='option to create and upload input manifest only.')
     parser.add_argument('--use-textract-only', action='store_true', help='Flag to indicate to only use Amazon Textract to analyze PDF document')
     parser.add_argument('--job-name-prefix', type=str, default='comprehend-semi-structured-docs', help='GroundTruth labeling job prefix. (Default: comprehend-semi-structured-docs)')
-    parser.add_argument('--annotator-metadata', type=str, help='Metadata to expose in the annotator UI. Usage: --annotator-metadata "key=Info,value=Sample information,key=Due Date,value=Sample date value 12/12/1212" ')
-    parser.add_argument('--blind1-labeling-job-name', type=str, help='Blind1 labeling job name to use for arbitration or iteration')
-    parser.add_argument('--blind2-labeling-job-name', type=str, help='Blind2 labeling job name to use for arbitration')
+    parser.add_argument('--annotator-metadata', type=str, help='Metadata to expose in the annotator UI. \
+        Usage: --annotator-metadata "key=Info,value=Sample information,key=Due Date,value=Sample date value 12/12/1212" ')
+    parser.add_argument('--blind1-labeling-job-name', type=str, help='Blind1 labeling job name to use for verification. Usage: --blind1-labeling-job-name sagemaker-labeling-job-123')
+    parser.add_argument('--blind2-labeling-job-name', type=str, help='Blind2 labeling job name to use for verification. Usage: --blind2-labeling-job-name sagemaker-labeling-job-123')
+    parser.add_argument('--only-include-expired-tasks', action='store_true', help='Flag to indicate to only include tasks which had expired (only available for use in conjunction with a verification job). \
+        Usage: --blind1-labeling-job-name labeling-job-123 --only-include-expired-tasks')
     parser.add_argument('--schema-path', type=str, help='Local path to schema file to use for the labeling job which will overwrite --entity-types. Usage: --annotation-schema /home/user1/schema.json')
     parser.add_argument('--no-suffix', action='store_true', help='Flag to indicate to only use job-name-prefix for job name. Otherwise, a unique ID will be appended to the job-name-prefix.')
     parser.add_argument('--task-time-limit', type=int, default=3600, help='Time limit in seconds given for each task (default: 3600). Usage (for 2 hours): --task-time-limit 7200')
+    parser.add_argument('--task-availability-time-limit', type=int, default=864000, help='Time availability time limit in seconds given for each task (default: 864000). \
+        Usage (for 30 days): --task-availability-time-limit 2592000')
 
     args = parser.parse_args()
 
@@ -293,27 +311,16 @@ def main():
         if not args.create_input_manifest_only:
             print('Please enter correct cloudformation stack name deployed by comprehend-semi-structured-documents-annotation-template.')
             return
-    s3_client = session.client('s3')
-    s3_resource = session.resource('s3')
+    s3_client = S3Client()
     sagemaker_client = session.client('sagemaker')
 
-    now = datetime.datetime.utcnow()
-    now_str = now.strftime('%Y%m%dT%H%M%S')
-    job_name_prefix = args.job_name_prefix
-    if args.no_suffix:
-        ground_truth_labeling_job_name = job_name_prefix
-        try:
-            describe_sagemaker_labeling_job(sagemaker_client, ground_truth_labeling_job_name)
-            print(f'{ground_truth_labeling_job_name} already exists. Please use a different job name.')
-            return
-        except Exception:
-            pass
-    else:
-        ground_truth_labeling_job_name =  f'{job_name_prefix}-labeling-job-{now_str}'
+    ground_truth_labeling_job_name = validate_groundtruth_labeling_job_name(sagemaker_client=sagemaker_client, job_name_prefix=args.job_name_prefix, no_suffix=args.no_suffix)
+    if not ground_truth_labeling_job_name:
+        print(f'{ground_truth_labeling_job_name} already exists. Please use a different job name.')
+        return
 
-    generated_data = generate_manifests_and_schema(
+    generated_data = generate_manifest_jsons_and_schema(
         s3_client,
-        s3_resource,
         sagemaker_client,
         ssie_documents_s3_bucket,
         annotator_metadata,
@@ -325,33 +332,30 @@ def main():
         return
     manifest_json_list, schema_content = generated_data
 
+    # Upload input manifest
     input_manifest_path = f's3://{ssie_documents_s3_bucket}/input-manifest/{ground_truth_labeling_job_name}.manifest'
-    write_jsonl(
-        input_manifest_path,
-        manifest_json_list,
-        s3_client
-    )
+    print('Uploading input manifest file.')
+    s3_client.write_jsonl(s3_path=input_manifest_path, rows=manifest_json_list)
 
-    print(f'Uploaded input manifest file to {input_manifest_path}')
     if args.create_input_manifest_only:
         return
 
-    # Uploade ui artifacts
+    # Upload ui artifacts
     ui_template_s3_path_prefix = f'comprehend-semi-structured-docs-ui-template/{ground_truth_labeling_job_name}'
     local_ui_template_directory_name = 'ui-template'
-    upload_directory(local_ui_template_directory_name, ssie_documents_s3_bucket, ui_template_s3_path_prefix, s3_client)
+    s3_client.upload_directory(local_dir_path=local_ui_template_directory_name, bucket_name=ssie_documents_s3_bucket, s3_path_prefix=ui_template_s3_path_prefix)
 
     # Upload the annotation schema file
     ui_schema_path = f's3://{ssie_documents_s3_bucket}/{ui_template_s3_path_prefix}/{local_ui_template_directory_name}/schema.json'
-    upload_object(schema_content, ui_schema_path, s3_client)
-    print(f'Uploaded schema file to {ui_schema_path}')
+    print('Uploading schema file.')
+    s3_client.write_content(content=schema_content, s3_path=ui_schema_path)
 
     # Upload the UI template file
     ui_template_path = f's3://{ssie_documents_s3_bucket}/{ui_template_s3_path_prefix}/{local_ui_template_directory_name}/template-2021-04-15.liquid'
     with open(f'./{local_ui_template_directory_name}/index.html', encoding='utf-8') as template:
         template_file = template.read().replace('TO_BE_REPLACE', f'{ssie_documents_s3_bucket}/{ui_template_s3_path_prefix}')
-        upload_object(template_file, ui_template_path, s3_client)
-        print(f'Uploaded template UI to {ui_template_path}')
+        print('Uploading template UI.')
+        s3_client.write_content(content=template_file, s3_path=ui_template_path)
 
     # Start a Sagemaker Groundtruth labeling job
     human_task_config = {
@@ -364,7 +368,7 @@ def main():
         'TaskDescription': ground_truth_labeling_job_name,
         'NumberOfHumanWorkersPerDataObject': 1,
         'TaskTimeLimitInSeconds': args.task_time_limit,
-        'TaskAvailabilityLifetimeInSeconds': 864000,
+        'TaskAvailabilityLifetimeInSeconds': args.task_availability_time_limit,
         'AnnotationConsolidationConfig': {
             'AnnotationConsolidationLambdaArn': gt_annotation_consolidation_lambda_function
         }
@@ -389,6 +393,7 @@ def main():
 
     result = sagemaker_client.create_labeling_job(**start_labeling_job_request)
     print("Sagemaker GroundTruth Labeling Job submitted: {}".format(result["LabelingJobArn"]))
+
 
 if __name__ == "__main__":
     main()
