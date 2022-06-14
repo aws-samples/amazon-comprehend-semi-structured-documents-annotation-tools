@@ -7,6 +7,7 @@ import os
 from datetime import datetime
 from typing import List, Dict
 import uuid
+import html
 
 from utils.s3_helper import S3Client
 from type.semi_structured_annotation import SemiStructuredAnnotation
@@ -31,6 +32,7 @@ def get_blocks_from_s3_ref(blocks_s3_ref: str, s3_client: S3Client) -> List:
 def get_annotation_obj(annotation_obj_str: str, s3_client: S3Client, file_name: str) -> SemiStructuredAnnotation:
     """Return a transformed annotations object to be written."""
     annotation_obj = SemiStructuredAnnotation(**json.loads(annotation_obj_str))
+    annotation_obj.BlocksS3Ref = html.unescape(annotation_obj.BlocksS3Ref)
     annotation_obj.Blocks = get_blocks_from_s3_ref(annotation_obj.BlocksS3Ref, s3_client)
     page_number = annotation_obj.DocumentMetadata.PageNumber
     annotation_file_name = get_annotation_file_name(file_name, page_number)

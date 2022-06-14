@@ -46,23 +46,28 @@ class AnnotationConsolidationLambdaTest(TestCase):
 
         # TODO: non-empty S3 reference
 
-    def test_get_annotations(self):
+    @patch("lambdas.annotation_consolidation_lambda.S3Client")
+    def test_get_annotations(self, mock_s3_client):
+        test_blocks = [{"BlockType": "LINE", "Id": "b7a47123-537e-41f9-b3bc-4e7646f28ad9", "Text": "Table of Contents", "Geometry": {"BoundingBox": {"Width": 0.11029728357421875, "Top": 0.05842941496959727, "Left": 0.05458785027452575, "Height": 0.011334459150469135}, "Polygon": [{"X": 0.05458785027452575, "Y": 0.05842941496959727}, {"X": 0.1648851338487445, "Y": 0.05842941496959727}, {"X": 0.1648851338487445, "Y": 0.0697638741200664}, {"X": 0.05458785027452575, "Y": 0.0697638741200664}]}, "Relationships": [{"Ids": ["3d7cb3f9-776b-498e-8db2-cc415e61dc92", "18f9300f-bcea-4af5-9f3a-6d12c15fe2ab", "4078ed92-e298-466f-9255-7b1929e15311"], "Type": "CHILD"}], "Page": 1}, {"BlockType": "WORD", "Id": "3d7cb3f9-776b-498e-8db2-cc415e61dc92", "Text": "Table", "Geometry": {"BoundingBox": {"Width": 0.034514469609507534, "Top": 0.05842941496959727, "Left": 0.05458785027452575, "Height": 0.011334459150469135}, "Polygon": [{"X": 0.05458785027452575, "Y": 0.05842941496959727}, {"X": 0.08910231988403328, "Y": 0.05842941496959727}, {"X": 0.08910231988403328, "Y": 0.0697638741200664}, {"X": 0.05458785027452575, "Y": 0.0697638741200664}]}, "Relationships": [], "Page": 1}, {"BlockType": "WORD", "Id": "18f9300f-bcea-4af5-9f3a-6d12c15fe2ab", "Text": "of", "Geometry": {"BoundingBox": {"Width": 0.01221866102521381, "Top": 0.05842941496959727, "Left": 0.09276933143804045, "Height": 0.011334459150469135}, "Polygon": [{"X": 0.09276933143804045, "Y": 0.05842941496959727}, {"X": 0.10498799246325426, "Y": 0.05842941496959727}, {"X": 0.10498799246325426, "Y": 0.0697638741200664}, {"X": 0.09276933143804045, "Y": 0.0697638741200664}]}, "Relationships": [], "Page": 1}, {"BlockType": "WORD", "Id": "4078ed92-e298-466f-9255-7b1929e15311", "Text": "Contents", "Geometry": {"BoundingBox": {"Width": 0.056230131074354706, "Top": 0.05842941496959727, "Left": 0.1086550027743898, "Height": 0.011334459150469135}, "Polygon": [{"X": 0.1086550027743898, "Y": 0.05842941496959727}, {"X": 0.1648851338487445, "Y": 0.05842941496959727}, {"X": 0.1648851338487445, "Y": 0.0697638741200664}, {"X": 0.1086550027743898, "Y": 0.0697638741200664}]}, "Relationships": [], "Page": 1}]
+        mock_s3_client.get_object_content_from_s3.return_value = json.dumps(test_blocks)
         annotation_map = json.dumps({
             "DocumentMetadata": {
                 "Pages": "10",
                 "PageNumber": "1"
             },
             "Version": "1234-56-78",
-            "DocumentType": SemiStructuredDocumentType.NativePDF.value
+            "DocumentType": SemiStructuredDocumentType.NativePDF.value,
+            "BlocksS3Ref": "s3://bucket/with/file/Some File &amp; an Ampersand"
         })
-        annotations_obj = get_annotation_obj(annotation_map, S3Client(), "some_file_name")
+        annotations_obj = get_annotation_obj(annotation_map, mock_s3_client, "some_file_name")
         self.assertEqual(annotations_obj.Version, "1234-56-78")
         self.assertEqual(annotations_obj.DocumentType, SemiStructuredDocumentType.NativePDF.value)
         self.assertEqual(annotations_obj.DocumentMetadata.Pages, "10")
         self.assertEqual(annotations_obj.DocumentMetadata.PageNumber, "1")
-        self.assertEqual(annotations_obj.Blocks, [])
+        self.assertListEqual(annotations_obj.Blocks, test_blocks)
         self.assertEqual(annotations_obj.Entities, [])
         self.assertTrue(annotations_obj.File.startswith("some_file_name-1"))
+        self.assertEqual(annotations_obj.BlocksS3Ref, "s3://bucket/with/file/Some File & an Ampersand")
 
     def test_get_annotation_file_name(self):
         file_name = get_annotation_file_name("some_file_name", 4)
