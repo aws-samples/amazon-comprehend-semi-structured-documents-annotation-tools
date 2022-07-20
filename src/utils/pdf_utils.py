@@ -2,28 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 """PDF utility functions."""
 
-from io import BytesIO
-from typing import List, Tuple
-from pdf2image import convert_from_bytes
+import io
+
+from PyPDF2 import pdf
 
 
-def ppm_image_file_to_png_bytes(ppm_image_file) -> bytes:
-    """Convert a PPM Image file to PNG bytes."""
-    bytes_io_obj = BytesIO()
-    ppm_image_file.save(bytes_io_obj, format='PNG')
-    return bytes_io_obj.getvalue()
+def get_pdf_page_bytes(pdf_bytes_io: io.BytesIO, page_number: int) -> bytes:
+    """Get the PDF bytes for a single PDF page."""
+    pdf_file_reader = pdf.PdfFileReader(stream=pdf_bytes_io, strict=False)
+    pdf_file_writer = pdf.PdfFileWriter()
 
+    page: pdf.PageObject = pdf_file_reader.getPage(pageNumber=page_number - 1)
+    pdf_file_writer.addPage(page=page)
 
-def convert_pdf_to_png_bytes(pdf_bytes, poppler_path: str, page_number: Tuple[int, None] = None) -> Tuple[List[bytes], bytes]:
-    """Convert PDF bytes to PNG bytes for all pages."""
-    pdf_ppm_image_files = convert_from_bytes(pdf_bytes, poppler_path=poppler_path)
-    if page_number:
-        return ppm_image_file_to_png_bytes(ppm_image_file=pdf_ppm_image_files[page_number - 1])
-    else:
-        all_pages_png_bytes = []
-        for pdf_ppm_image_file in pdf_ppm_image_files:
-            all_pages_png_bytes.append(ppm_image_file_to_png_bytes(ppm_image_file=pdf_ppm_image_file))
-        return all_pages_png_bytes
+    pdf_page_bytes_io = io.BytesIO()
+    pdf_file_writer.write(pdf_page_bytes_io)
+    page_bytes = pdf_page_bytes_io.getvalue()
+
+    print(f"Length of bytes for page_number {page_number}: {len(page_bytes)}")
+    return page_bytes
 
 
 def get_pdf_bytes(path_to_pdf: str) -> bytes:

@@ -55,11 +55,11 @@ activate:
 update:
 	$(PYTHON) -m pipenv install # Install dependencies and update the pipfile.lock file
 	$(PYTHON) -m pipenv sync --dev #  Install locked dependencies from pipfile.lock
-	$(PYTHON) -m pipenv lock --requirements > $(SRC_DIR)/requirements.txt
+	$(PYTHON) -m pipenv requirements > $(SRC_DIR)/requirements.txt
 
 # Run basic python checkstyle and cnf-lint, and build the CFN template using sam cli
 build:
-	$(PYTHON) -m pipenv lock --requirements > $(SRC_DIR)/requirements.txt
+	$(PYTHON) -m pipenv requirements > $(SRC_DIR)/requirements.txt
 	$(PYTHON) -m pipenv run flake8 $(SRC_DIR) $(BIN_DIR)
 	$(PYTHON) -m pipenv run pydocstyle $(SRC_DIR) $(BIN_DIR)
 	$(PYTHON) -m pipenv run cfn-lint $(SRC_TEMPLATE_NAME).yml

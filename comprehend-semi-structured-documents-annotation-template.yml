@@ -170,8 +170,6 @@ Resources:
       Role:
         Fn::GetAtt: [GTPreHumanTaskLambdaExecutionRole, Arn]
       CodeUri: src
-      Layers:
-        - !Ref PopplerBinariesLayer
       Runtime: python3.8
       Timeout: !Ref PreHumanLambdaTimeoutInSeconds
 
@@ -184,16 +182,6 @@ Resources:
       CodeUri: src
       Runtime: python3.8
       Timeout: !Ref ConsolidationLambdaTimeoutInSeconds
-
-  PopplerBinariesLayer:
-    Type: AWS::Serverless::LayerVersion
-    Properties:
-      LayerName: PopplerBinariesLayer
-      Description: Poppler binaries needed to extract PDF
-      ContentUri: Layers/Poppler/
-      CompatibleRuntimes:
-        - python3.8
-      LicenseInfo: 'GPLv2'
 
 Outputs:
   GTPreHumanTaskLambdaFunctionName:

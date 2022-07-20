@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT-0
 
 """Pre Human Lambda function handler."""
+import io
 import json
 import os
 import base64
@@ -16,7 +17,7 @@ from utils.block_helper import JSONHandler, Geometry, Block, Relationship
 from constants import general
 from type.semi_structured_annotation import SemiStructuredAnnotation, SemiStructuredDocumentType
 from utils.textract_helper import TextractClient
-from utils.pdf_utils import convert_pdf_to_png_bytes
+from utils.pdf_utils import get_pdf_page_bytes
 
 
 def is_scanned_pdf(images, page_width: float, page_height: float):
@@ -34,9 +35,9 @@ def is_scanned_pdf(images, page_width: float, page_height: float):
         return False
 
 
-def get_pdf_blocks(pdf_bytes: bytes, page_num: int, use_textract_only: bool, source_ref: str, textract_client: TextractClient, poppler_path=general.POPPLER_PATH):
+def get_pdf_blocks(pdf_bytes: bytes, page_num: int, use_textract_only: bool, source_ref: str, textract_client: TextractClient):
     """Get the Block objects from a PDF and also return it's type."""
-    bytes_io_obj = BytesIO(pdf_bytes)
+    pdf_bytes_io = BytesIO(pdf_bytes)
     blocks = []
     is_native_pdf = False
 
@@ -44,16 +45,15 @@ def get_pdf_blocks(pdf_bytes: bytes, page_num: int, use_textract_only: bool, sou
     #   https://github.com/jsvine/pdfplumber/blob/ecc9e8e16dfc2cfc1fef0749ddb75198ab6594d4/pdfplumber/pdf.py
     #   https://github.com/jsvine/pdfplumber/blob/stable/pdfplumber/page.py
     try:
-        with pdfplumber.open(bytes_io_obj) as pdf:
+        with pdfplumber.open(pdf_bytes_io) as pdf:
             page = pdf.pages[page_num - 1]
             width, height = float(page.width), float(page.height)
 
             if use_textract_only or is_scanned_pdf(page.images, width, height):
                 print(f"use_textract_only = {use_textract_only} or Scanned PDF. getting blocks from textract")
                 blocks = blocks_from_scanned_pdf(
-                    pdf_bytes,
+                    pdf_bytes_io,
                     page_num,
-                    poppler_path=poppler_path,
                     textract_client=textract_client
                 )
             else:
@@ -63,7 +63,7 @@ def get_pdf_blocks(pdf_bytes: bytes, page_num: int, use_textract_only: bool, sou
     except Exception:
         print(f"Exception occurred opening {source_ref}, treating as Textract use-case")
         traceback.print_exc()  # print stacktrace
-        blocks = blocks_from_scanned_pdf(pdf_bytes, page_num, poppler_path=poppler_path, textract_client=textract_client)
+        blocks = blocks_from_scanned_pdf(pdf_bytes_io, page_num, textract_client=textract_client)
     return blocks, is_native_pdf
 
 
@@ -214,12 +214,11 @@ def textract_block_to_block(page: int, textract_block: dict, index: int, parent_
     return block
 
 
-def blocks_from_scanned_pdf(pdf_bytes: bytes, page_number: int, poppler_path: str, textract_client: TextractClient):
+def blocks_from_scanned_pdf(pdf_bytes_io: io.BytesIO, page_number: int, textract_client: TextractClient):
     """Return a list of blocks from a scanned PDF."""
-    page_png_byte_value = convert_pdf_to_png_bytes(pdf_bytes=pdf_bytes, poppler_path=poppler_path, page_number=page_number)
-    print(f"len of page_png_byte_value = {len(page_png_byte_value)}")
+    page_byte_value = get_pdf_page_bytes(pdf_bytes_io=pdf_bytes_io, page_number=page_number)
     try:
-        result = textract_client.detect_document_text(page_png_byte_value)
+        result = textract_client.detect_document_text(page_byte_value)
         textract_blocks = result["Blocks"]
         textract_line_blocks = [block for block in textract_blocks if block['BlockType'] == 'LINE']
         textract_word_blocks = [block for block in textract_blocks if block['BlockType'] == 'WORD']
@@ -324,11 +323,6 @@ def lambda_handler(event, context):
     job_id = job_arn.split('/')[-1]
     print(f'labeling job id = {job_id}')
     data_obj = event["dataObject"]
-
-    print(f"POPPLER_PATH: {general.POPPLER_PATH} file permission info")
-    print(f"READ Permission: {os.access(general.POPPLER_PATH, os.R_OK)}")
-    print(f"WRITE Permission: {os.access(general.POPPLER_PATH, os.W_OK)}")
-    print(f"EXEC Permission: {os.access(general.POPPLER_PATH, os.X_OK)}")
 
     metadata = data_obj.get("metadata")
 

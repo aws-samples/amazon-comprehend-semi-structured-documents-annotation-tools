@@ -6,9 +6,9 @@ name = "pypi"
 [packages]
 boto3 = "*"
 requests = "*"
-pdfplumber = "*"
-pdf2image = "*"
+pdfplumber = "==0.5.28"
 pydantic = "*"
+PyPDF2 = "==1.26.0"
 
 [dev-packages]
 autopep8 = "*"
@@ -19,6 +19,7 @@ pytest-cov = "*"
 flake8 = "*"
 pydocstyle = "*"
 cfn-lint = "*"
+pipenv = "*"
 
 [requires]
 python_version = "3.8"

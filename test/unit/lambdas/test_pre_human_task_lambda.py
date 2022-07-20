@@ -91,7 +91,6 @@ class PreHumanTaskLambdaTest(TestCase):
             page_num=1,
             use_textract_only=False,
             source_ref='test/unit/resources/sample_documents/scanned.pdf',
-            poppler_path=None,
             textract_client=MockTextractClient('scanned_1_blocks.json')
         )
         self.assertFalse(scanned_is_native)
@@ -105,7 +104,6 @@ class PreHumanTaskLambdaTest(TestCase):
             page_num=1,
             use_textract_only=False,
             source_ref='test/unit/resources/sample_documents/file2.pdf',
-            poppler_path=None,
             textract_client=None
         )
         self.assertTrue(native_is_native)
@@ -116,7 +114,6 @@ class PreHumanTaskLambdaTest(TestCase):
             page_num=1,
             use_textract_only=True,
             source_ref='test/unit/resources/sample_documents/file2.pdf',
-            poppler_path=None,
             textract_client=MockTextractClient('file2_1_blocks.json')
         )
         self.assertFalse(native_is_native)
@@ -133,7 +130,6 @@ class PreHumanTaskLambdaTest(TestCase):
                 page_num=1,
                 use_textract_only=False,
                 source_ref='test/unit/resources/sample_documents/file2.pdf',
-                poppler_path=None,
                 textract_client=None
             )
 
