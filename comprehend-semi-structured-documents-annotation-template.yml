@@ -53,6 +53,11 @@ Resources:
           - AllowedHeaders: []
             AllowedMethods: [GET]
             AllowedOrigins: ['*']
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
 
   SemiStructuredDocumentsS3BucketPolicy:
     Type: AWS::S3::BucketPolicy
